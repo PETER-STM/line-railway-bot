@@ -2,3 +2,4 @@ Flask
 gunicorn
 line-bot-sdk
 psycopg2-binary
+python-dateutil # <--- 新增
