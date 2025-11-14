@@ -19,23 +19,31 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
 def get_db_connection():
     """使用環境變數連線到 PostgreSQL"""
+    
+    # 優先使用 Railway 自動提供的 DATABASE_URL
     conn_url = os.environ.get("DATABASE_URL")
-    if not conn_url:
-        try:
-            conn = psycopg2.connect(
-                host=os.environ.get('PGHOST'),
-                database=os.environ.get('PGDATABASE'),
-                user=os.environ.get('PGUSER'),
-                password=os.environ.get('PGPASSWORD'),
-                port=os.environ.get('PGPORT')
-            )
-            return conn
-        except Exception as e:
-            print(f"Database connection failed: {e}")
-            return None
-    return psycopg2.connect(conn_url)
-
-
+    if conn_url:
+        return psycopg2.connect(conn_url)
+    
+    # 如果 DATABASE_URL 不存在，則使用 PG* 單獨變數 (這應該是 Railway 自動注入的)
+    try:
+        conn = psycopg2.connect(
+            host=os.environ.get('PGHOST'),
+            database=os.environ.get('PGDATABASE'),
+            user=os.environ.get('PGUSER'),
+            password=os.environ.get('PGPASSWORD'),
+            port=os.environ.get('PGPORT')
+        )
+        return conn
+    except Exception as e:
+        # 當無法連線時，印出具體的環境變數值，幫助診斷
+        print("--- DB 連線偵錯資訊 ---")
+        print(f"PGHOST: {os.environ.get('PGHOST')}")
+        print(f"PGUSER: {os.environ.get('PGUSER')}")
+        print(f"PGDATABASE: {os.environ.get('PGDATABASE')}")
+        print("-----------------------")
+        print(f"Database connection failed: {e}")
+        return None
 def get_report_data(conn, start_date, end_date):
     """從 reports 表格中獲取指定週期內的回報資料"""
     sql = """
