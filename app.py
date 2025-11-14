@@ -1,4 +1,4 @@
-# app.py - 修正版 (已修復 '新增人名' 邏輯並更新 'railway' 日期格式)
+# app.py - 最終修正版 (移除 railway 關鍵字限制)
 import os
 import re
 from datetime import datetime
@@ -14,7 +14,6 @@ import psycopg2
 
 app = Flask(__name__)
 
-# 讓程式碼可以接受 'ACCESS_TOKEN' 或 'LINE_CHANNEL_ACCESS_TOKEN'
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN") or os.environ.get("ACCESS_TOKEN")
 LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET") or os.environ.get("SECRET")
 
@@ -32,7 +31,6 @@ def get_db_connection():
     """使用環境變數連線到 PostgreSQL"""
     conn_url = os.environ.get("DATABASE_URL")
     
-    # 如果沒有 DATABASE_URL，則使用 PG* 變數構建連線
     if not conn_url:
         try:
             conn = psycopg2.connect(
@@ -83,7 +81,6 @@ def add_reporter(group_id, reporter_name):
         conn = get_db_connection()
         cur = conn.cursor()
         
-        # 使用 ON CONFLICT DO NOTHING 處理重複新增
         sql = """
             INSERT INTO group_reporters (group_id, reporter_name)
             VALUES (%s, %s)
@@ -138,7 +135,7 @@ def handle_message(event):
     else:
         source_id = user_id
     
-    # 處理 "新增人名" 指令
+    # 處理 "新增人名" 指令 (優先判斷)
     if text.startswith('新增人名'):
         reporter_name = text[len('新增人名'):].strip() 
         
@@ -157,44 +154,46 @@ def handle_message(event):
                 else:
                     reply_text = f"ℹ️ **{reporter_name}** 已經是回報人，無需重複新增。"
 
-    # 判斷是否為回報指令: "railway YYYY.MM.DD（X）人名"
-    elif text.lower().startswith('railway'):
+    # 🌟 修正點：將日期格式判斷提到第二優先，並移除 'railway' 關鍵字匹配
+    # 判斷是否為回報指令: "YYYY.MM.DD（X）人名"
+    # Group 1: Date String (YYYY.MM.DD)
+    # Optional: 匹配並忽略 （日）這類資訊
+    # Group 2: 提取人名
+    elif re.search(r'^\s*(\d{4}[./]\d{1,2}[./]\d{1,2})\s*（[^）]+）?\s*(.+)', text):
         
-        # 🌟 修正點 3: 更新正規表達式
-        # r'railway\s+(\d{4}[./]\d{1,2}[./]\d{1,2})\s*（[^）]+）?\s*(.+)'
-        # Group 1: 僅提取 YYYY.MM.DD 或 YYYY/MM/DD
-        # Optional: 匹配並忽略 （日）這類資訊
-        # Group 2: 提取人名
-        match = re.search(r'railway\s+(\d{4}[./]\d{1,2}[./]\d{1,2})\s*（[^）]+）?\s*(.+)', text, re.IGNORECASE)
+        # 使用正規表達式匹配日期和人名 (現在不匹配 'railway' 關鍵字)
+        match = re.search(r'^\s*(\d{4}[./]\d{1,2}[./]\d{1,2})\s*（[^）]+）?\s*(.+)', text)
         
         if match:
             date_str = match.group(1).replace('/', '.') # 取得 YYYY.MM.DD
             name = match.group(2).strip()
             
-            try:
-                report_date = datetime.strptime(date_str, '%Y.%m.%d').date()
-                
-                # 執行儲存，傳入 source_id
-                success = save_report(report_date, name, user_id, source_id)
-                
-                if success:
-                    # 修正範例回覆
-                    reply_text = f"✅ 紀錄成功！\n回報者: **{name}**\n日期: **{report_date.strftime('%Y/%m/%d')}**\n\n感謝您的回報！"
-                else:
-                    reply_text = "❌ 資料庫儲存失敗，請聯繫管理員檢查 DB 連線。"
-                
-            except ValueError:
-                # 修正範例回覆
-                reply_text = "❌ 日期格式錯誤！請使用 YYYY.MM.DD 或 YYYY/MM/DD 格式。\n\n範例：`railway 2025.11.09（日）伊森`"
-            
+            # 確保人名不是空的 (例如使用者輸入了日期但沒有人名)
+            if not name:
+                 reply_text = "⚠️ 回報格式不正確。\n\n正確格式：`YYYY.MM.DD（X）人名`\n範例：`2025.11.09（日）伊森`"
+            else:
+                try:
+                    report_date = datetime.strptime(date_str, '%Y.%m.%d').date()
+                    
+                    # 執行儲存，傳入 source_id
+                    success = save_report(report_date, name, user_id, source_id)
+                    
+                    if success:
+                        reply_text = f"✅ 紀錄成功！\n回報者: **{name}**\n日期: **{report_date.strftime('%Y/%m/%d')}**\n\n感謝您的回報！"
+                    else:
+                        reply_text = "❌ 資料庫儲存失敗，請聯繫管理員檢查 DB 連線。"
+                    
+                except ValueError:
+                    reply_text = "❌ 日期格式錯誤！請使用 YYYY.MM.DD 或 YYYY/MM/DD 格式。\n\n範例：`2025.11.09（日）伊森`"
+        
+        # 如果正規表達式匹配失敗 (理論上不會發生，因為已經在 elif 中判斷過)
         else:
-            # 修正範例回覆
-            reply_text = "⚠️ 回報格式不正確。\n\n正確格式：`railway YYYY.MM.DD（X）人名`\n範例：`railway 2025.11.09（日）伊森`"
+             reply_text = "⚠️ 回報格式不正確。\n\n正確格式：`YYYY.MM.DD（X）人名`\n範例：`2025.11.09（日）伊森`"
     
     else:
-        # 非回報指令 (預設回覆) - 修正範例
-        reply_text = "我是鐵路回報紀錄 Bot。\n\n請使用以下格式紀錄：\n`railway YYYY.MM.DD（X）人名`\n`新增人名 [人名]`\n\n範例：`railway 2025.11.09（日）伊森`"
-
+        # 非回報指令 (預設回覆)
+        reply_text = "我是鐵路回報紀錄 Bot。\n\n請使用以下格式紀錄：\n`YYYY.MM.DD（X）人名`\n`新增人名 [人名]`\n\n範例：`2025.11.09（日）伊森`"
+        
     # 回覆訊息給使用者
     line_bot_api.reply_message(
         event.reply_token,
