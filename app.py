@@ -1,5 +1,4 @@
-# app.py
-
+# app.py - 修正版
 import os
 import re
 from datetime import datetime
@@ -15,10 +14,12 @@ import psycopg2
 
 app = Flask(__name__)
 
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+# 🌟 修正點 1: 讓程式碼可以接受 'ACCESS_TOKEN' (避免 ValueError 啟動錯誤)
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN") or os.environ.get("ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET") or os.environ.get("SECRET")
 
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
+    # 這裡的錯誤應該在 Railway 環境變數正確後不會再出現
     raise ValueError("Line API 相關環境變數 (ACCESS_TOKEN / SECRET) 未設置！")
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
@@ -32,18 +33,22 @@ def get_db_connection():
     """使用環境變數連線到 PostgreSQL"""
     conn_url = os.environ.get("DATABASE_URL")
     
+    # 🌟 修正點 2: 如果沒有 DATABASE_URL，則使用 PG* 變數構建連線
     if not conn_url:
         try:
-            conn_url = (
-                f"postgresql://{os.environ.get('PGUSER')}:"
-                f"{os.environ.get('PGPASSWORD')}@"
-                f"{os.environ.get('PGHOST')}:"
-                f"{os.environ.get('PGPORT')}/"
-                f"{os.environ.get('PGDATABASE')}"
+            # 由於您已在 Railway 設置 PG* 變數，直接使用它們連線更可靠
+            conn = psycopg2.connect(
+                host=os.environ.get('PGHOST'),
+                database=os.environ.get('PGDATABASE'),
+                user=os.environ.get('PGUSER'),
+                password=os.environ.get('PGPASSWORD'),
+                port=os.environ.get('PGPORT')
             )
+            return conn
         except Exception:
-            raise ValueError("資料庫連線環境變數未設置！")
-        
+            raise ValueError("資料庫連線環境變數未設置或連線失敗！")
+            
+    # 如果 DATABASE_URL 存在 (例如 Railway 自動注入)
     conn = psycopg2.connect(conn_url)
     return conn
 
@@ -74,6 +79,36 @@ def save_report(report_date, name, user_id, source_id):
     finally:
         if conn:
             conn.close()
+
+# 🌟 新增函式：資料庫操作：新增回報人
+def add_reporter(group_id, reporter_name):
+    """將人名新增到 group_reporters 表，並檢查是否已存在"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # 使用 ON CONFLICT DO NOTHING 處理重複新增 (假設 group_id 和 reporter_name 是 UNIQUE)
+        sql = """
+            INSERT INTO group_reporters (group_id, reporter_name)
+            VALUES (%s, %s)
+            ON CONFLICT (group_id, reporter_name) DO NOTHING
+        """
+        cur.execute(sql, (group_id, reporter_name))
+        
+        # 檢查是否有行被插入 (即是否為新資料)
+        inserted_rows = cur.rowcount
+        conn.commit()
+        cur.close()
+        
+        return inserted_rows > 0
+    except Exception as e:
+        app.logger.error(f"新增回報人錯誤: {e}")
+        return False
+    finally:
+        if conn:
+            conn.close()
+
 
 # -----------------
 # 4. Webhook 接收與處理
@@ -109,8 +144,30 @@ def handle_message(event):
     else:
         source_id = user_id
     
+    # 🌟 新增邏輯：處理 "新增人名" 指令
+    if text.startswith('新增人名'):
+        # 移除 "新增人名" 後的內容，並去除空格
+        reporter_name = text[len('新增人名'):].strip() 
+        
+        if not reporter_name:
+            reply_text = "⚠️ 請提供人名，例如：新增人名 陳經理"
+        else:
+            # 檢查是否在群組/聊天室中
+            if event.source.type not in ['group', 'room']:
+                reply_text = "❌ 只能在群組或聊天室中新增回報人。"
+            else:
+                success = add_reporter(source_id, reporter_name)
+                
+                if success:
+                    reply_text = f"✅ 已成功新增：**{reporter_name}** 為回報人！"
+                elif success is False:
+                    reply_text = "❌ 資料庫儲存失敗，請聯繫管理員檢查 DB 連線。"
+                else:
+                    reply_text = f"ℹ️ **{reporter_name}** 已經是回報人，無需重複新增。"
+
+
     # 判斷是否為回報指令: "railway YYYY.MM.DD 人名"
-    if text.lower().startswith('railway'):
+    elif text.lower().startswith('railway'):
         
         # 使用正規表達式匹配日期和人名 (支持 YYYY.MM.DD 或 YYYY/MM/DD)
         match = re.search(r'railway\s+(\d{4}[./]\d{1,2}[./]\d{1,2})\s+(.+)', text, re.IGNORECASE)
@@ -137,8 +194,8 @@ def handle_message(event):
             reply_text = "⚠️ 回報格式不正確。\n\n正確格式：`railway YYYY.MM.DD 人名`\n範例：`railway 2025.11.09 伊森`"
     
     else:
-        # 非回報指令
-        reply_text = "我是鐵路回報紀錄 Bot。\n\n請使用以下格式紀錄：\n`railway YYYY.MM.DD 人名`\n\n範例：`railway 2025.11.09 伊森`"
+        # 非回報指令 (預設回覆)
+        reply_text = "我是鐵路回報紀錄 Bot。\n\n請使用以下格式紀錄：\n`railway YYYY.MM.DD 人名`\n`新增人名 [人名]`\n\n範例：`railway 2025.11.09 伊森`"
 
     # 回覆訊息給使用者
     line_bot_api.reply_message(
