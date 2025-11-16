@@ -1,4 +1,4 @@
-# app.py - Line Bot Webhook 處理和資料庫互動 (最終穩定修正版)
+# app.py - Line Bot Webhook 處理和資料庫互動 (最終穩定修正版 - 使用 WebhookHandler)
 
 import os
 import re
@@ -7,11 +7,11 @@ from datetime import datetime
 from flask import Flask, request, abort 
 
 # =========================================================
-# 🏆 最終解決：恢復 WebhookParser，從最常見的 v3.webhooks 導入
+# 🏆 最終解決：使用 WebhookHandler 及其 Decorator 模式
 # =========================================================
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, TextMessage
-# ✅ 從 linebot.v3.webhooks 導入 WebhookParser
-from linebot.v3.webhooks import WebhookParser, MessageEvent, TextMessageContent 
+# ✅ 從 linebot.v3.webhooks 導入 WebhookHandler
+from linebot.v3.webhooks import WebhookHandler, MessageEvent, TextMessageContent 
 from linebot.v3.exceptions import InvalidSignatureError, ApiException 
 
 # --- Line Bot Setup ---
@@ -27,13 +27,14 @@ configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 api_client = ApiClient(configuration)
 line_messaging_api = MessagingApi(api_client)
 
-# V3: 使用 WebhookParser
-parser = WebhookParser(LINE_CHANNEL_SECRET) 
+# V3: 使用 WebhookHandler (這是 Log 建議的類別)
+# ❗ WebhookHandler 必須傳入 line_messaging_api 實例
+handler = WebhookHandler(LINE_CHANNEL_SECRET, line_messaging_api) 
 
 # Flask 應用初始化
 app = Flask(__name__)
 
-# --- 資料庫連線函式 ---
+# --- 資料庫連線函式 (保持不變) ---
 def get_db_connection():
     """使用環境變數連線到 PostgreSQL (優先使用 DATABASE_URL)"""
     conn_url = os.environ.get("DATABASE_URL")
@@ -57,7 +58,7 @@ def get_db_connection():
         print(f"Database connection failed: {e}")
         return None
 
-# --- 資料庫操作：新增人名 ---
+# --- 資料庫操作：新增人名 (保持不變) ---
 def add_reporter(source_id, name):
     conn = get_db_connection()
     if not conn:
@@ -80,7 +81,7 @@ def add_reporter(source_id, name):
     finally:
         if conn: conn.close()
 
-# --- 資料庫操作：刪除人名 ---
+# --- 資料庫操作：刪除人名 (保持不變) ---
 def delete_reporter(source_id, name):
     conn = get_db_connection()
     if not conn:
@@ -107,7 +108,7 @@ def delete_reporter(source_id, name):
     finally:
         if conn: conn.close()
 
-# --- 資料庫操作：儲存回報 ---
+# --- 資料庫操作：儲存回報 (保持不變) ---
 def save_report(report_date, name, source_id):
     conn = get_db_connection()
     if not conn:
@@ -127,11 +128,37 @@ def save_report(report_date, name, source_id):
     finally:
         if conn: conn.close()
 
+# -----------------------------------------------------------
+# Flask Webhook 路由 (使用 WebhookHandler 處理請求)
 
-# --- Line 訊息處理邏輯 ---
-def handle_message(event):
-    """處理接收到的 Line 文本訊息事件"""
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers.get('X-Line-Signature', '')
+    body = request.get_data(as_text=True)
+    
+    try:
+        # V3: 使用 handler.handle 呼叫被裝飾的函式
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        print("Invalid signature. Check your channel secret.")
+        abort(400)
+    except Exception as e:
+        print(f"Webhook handling error: {e}")
+        # 這裡不應再出現 ImportError，但為了安全留下錯誤處理
+        return 'OK' 
+
+    return 'OK'
+
+# -----------------------------------------------------------
+# Line 訊息處理邏輯 (使用 WebhookHandler Decorator)
+
+# 🏆 使用 @handler.add 裝飾器取代原來的 handle_message 函式
+@handler.add(MessageEvent, message=TextMessageContent)
+def handle_text_message(event):
+    """處理接收到的 Line 文本訊息事件 (由 WebhookHandler 自動觸發)"""
+    
     text = event.message.text.strip()
+    # 統一獲取來源 ID (群組或用戶)
     source_id = event.source.group_id if hasattr(event.source, 'group_id') else event.source.user_id 
 
     # 1. 處理「新增人名」指令
@@ -139,6 +166,7 @@ def handle_message(event):
     if match_add:
         name_to_add = match_add.group(1).strip()
         success, message = add_reporter(source_id, name_to_add)
+        # WebhookHandler 會自動使用 line_messaging_api 進行回覆
         line_messaging_api.reply_message(
             reply_token=event.reply_token,
             messages=[TextMessage(text=message)] 
@@ -185,37 +213,6 @@ def handle_message(event):
 
     # 4. 處理「雜訊」（非指令訊息）
     return 
-
-# -----------------------------------------------------------
-# Flask Webhook 路由 (使用 WebhookParser 解析事件)
-
-@app.route("/callback", methods=['POST'])
-def callback():
-    signature = request.headers.get('X-Line-Signature', '')
-    body = request.get_data(as_text=True)
-    
-    try:
-        # V3: 使用 parser.parse 解析請求體和簽名
-        events = parser.parse(body, signature)
-    except InvalidSignatureError:
-        print("Invalid signature. Check your channel secret.")
-        abort(400)
-    except Exception as e:
-        print(f"Webhook parsing error: {e}")
-        return 'OK' 
-
-    # 遍歷所有解析出來的事件
-    for event in events:
-        try:
-            # 僅處理 MessageEvent 且內容是 TextMessageContent 的事件
-            if isinstance(event, MessageEvent) and isinstance(event.message, TextMessageContent):
-                handle_message(event) # 直接呼叫處理函式
-        except ApiException as e:
-            print(f"Line API Error during event handling: {e}")
-        except Exception as e:
-            print(f"Unexpected error during event handling: {e}")
-            
-    return 'OK'
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
