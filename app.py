@@ -7,13 +7,11 @@ from datetime import datetime
 from flask import Flask, request, abort 
 
 # =========================================================
-# 【最終解決】Line SDK V3 導入：使用 linebot.v3.parser.WebhookParser
+# 🏆 最終解決：恢復 WebhookParser，從最常見的 v3.webhooks 導入
 # =========================================================
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, TextMessage
-# 導入事件類別
-from linebot.v3.webhooks import MessageEvent, TextMessageContent 
-# ✅ 從 linebot.v3.parser 導入 WebhookParser (解決路徑衝突的根源)
-from linebot.v3.parser import WebhookParser
+# ✅ 從 linebot.v3.webhooks 導入 WebhookParser
+from linebot.v3.webhooks import WebhookParser, MessageEvent, TextMessageContent 
 from linebot.v3.exceptions import InvalidSignatureError, ApiException 
 
 # --- Line Bot Setup ---

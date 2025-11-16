@@ -8,10 +8,9 @@ from flask import Flask, request, abort
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, TextMessage, ApiException
 
 # =========================================================
-# 【最終解決】Line SDK V3 導入：移除所有 Webhook 處理相關類別
+# 🏆 最終解決：僅保留需要的 Line SDK 類別，移除所有 Webhook 相關導入
 # =========================================================
-# Worker 服務不處理 Webhook，只需錯誤處理
-from linebot.v3.exceptions import InvalidSignatureError 
+from linebot.v3.exceptions import InvalidSignatureError # 僅保留錯誤處理
 
 # --- Line Bot Setup ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
