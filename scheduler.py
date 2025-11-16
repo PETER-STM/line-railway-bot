@@ -10,8 +10,8 @@ from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, TextMes
 # =========================================================
 # 【核心修正】Line SDK V3 導入：確保 WebhookParser 路徑正確
 # =========================================================
-from linebot.v3.webhooks import MessageEvent, TextMessageContent
-from linebot.v3.parser import WebhookParser # <--- 從 linebot.v3.parser 正確導入
+# 修正後的正確導入路徑：WebhookParser 應從 linebot.v3.webhooks 導入
+from linebot.v3.webhooks import WebhookParser, MessageEvent, TextMessageContent
 from linebot.v3.exceptions import InvalidSignatureError
 
 # --- Line Bot Setup ---
