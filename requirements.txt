@@ -1,5 +1,5 @@
-Flask [cite: 3]
-gunicorn [cite: 3]
-line-bot-sdk [cite: 3]
-psycopg2-binary [cite: 3]
-python-dateutil # <--- 新增 [cite: 3]
+Flask
+gunicorn
+line-bot-sdk
+psycopg2-binary
+python-dateutil
