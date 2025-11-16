@@ -1,5 +1,5 @@
 Flask
 gunicorn
-line-bot-sdk==2.0.0
+line-bot-sdk==2.0.1
 psycopg2-binary
 python-dateutil
