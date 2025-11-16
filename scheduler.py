@@ -1,36 +1,31 @@
-# scheduler.py - 排程應用程式 (最終穩定修正版)
+# scheduler.py - 排程應用程式 (Line SDK V2 最終版)
 
 import os
 import re
 import psycopg2
 from datetime import datetime
 from flask import Flask, request, abort 
-from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, TextMessage, ApiException
-
 # =========================================================
-# 🏆 最終解決：僅保留需要的 Line SDK 類別，移除所有 Webhook 相關導入
+# 【V2 核心】導入 Line SDK V2 類別
 # =========================================================
-from linebot.v3.exceptions import InvalidSignatureError # 僅保留錯誤處理
+from linebot import LineBotApi
+from linebot.exceptions import LineBotApiError as ApiException 
+from linebot.models import TextMessage
 
 # --- Line Bot Setup ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 
-if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
+if not LINE_CHANNEL_ACCESS_TOKEN:
     print("Error: Line tokens are not set in environment variables.")
     pass 
 
-# V3: 建立配置和客戶端
-configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
-api_client = ApiClient(configuration)
-
-# V3: Messaging API 客戶端
-line_messaging_api = MessagingApi(api_client)
+# V2: 建立客戶端
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 
 # Flask 應用初始化 (這裡只需要一個簡單的 Flask 應用來啟動 Worker)
 app = Flask(__name__)
 
-# --- 資料庫連線函式 ---
+# --- 資料庫連線函式 (保持不變) ---
 def get_db_connection():
     """使用環境變數連線到 PostgreSQL (優先使用 DATABASE_URL)"""
     conn_url = os.environ.get("DATABASE_URL")
@@ -54,7 +49,7 @@ def get_db_connection():
         print(f"Database connection failed: {e}")
         return None
 
-# --- 資料庫操作：獲取群組列表 ---
+# --- 資料庫操作：獲取群組列表 (保持不變) ---
 def get_groups_with_missing_reports():
     conn = get_db_connection()
     if not conn:
@@ -110,10 +105,10 @@ def send_daily_reminder():
             print(f"Sending reminder to group {group_id} for: {reporters_list}")
             
             try:
-                # V3: 使用 push_message (需要群組 ID)
-                line_messaging_api.push_message(
+                # V2: 使用 line_bot_api.push_message
+                line_bot_api.push_message(
                     to=group_id,
-                    messages=[TextMessage(text=message)]
+                    messages=TextMessage(text=message) # V2 的 messages 參數可以是單一物件
                 )
             except ApiException as e:
                 print(f"Failed to send message to {group_id}: {e}")
