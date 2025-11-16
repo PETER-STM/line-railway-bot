@@ -8,10 +8,9 @@ from flask import Flask, request, abort
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, TextMessage, ApiException
 
 # =========================================================
-# 【核心修正】Line SDK V3 導入：確保 WebhookParser 路徑正確
+# 【最終修正】Line SDK V3 導入：移除 WebhookParser 相關代碼
 # =========================================================
-# 修正後的正確導入路徑：WebhookParser 應從 linebot.v3.webhooks 導入
-from linebot.v3.webhooks import WebhookParser, MessageEvent, TextMessageContent
+# 這裡只需要 Line SDK 錯誤處理和訊息類型，不需 WebhookHandler 或 WebhookParser
 from linebot.v3.exceptions import InvalidSignatureError
 
 # --- Line Bot Setup ---
@@ -26,8 +25,7 @@ if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 api_client = ApiClient(configuration)
 
-# V3: 使用 WebhookParser 
-parser = WebhookParser(LINE_CHANNEL_SECRET) 
+# V3: Messaging API 客戶端
 line_messaging_api = MessagingApi(api_client)
 
 # Flask 應用初始化 (這裡只需要一個簡單的 Flask 應用來啟動 Worker)
@@ -127,14 +125,15 @@ def send_daily_reminder():
 @app.route("/run_scheduler")
 def run_scheduler():
     """手動觸發排程（可作為 Cron Job Endpoint）"""
-    print("--- Scheduler Task Started ---")
+    print("--- Scheduler Task Started ---\n")
     send_daily_reminder()
-    print("--- Scheduler Task Finished ---")
+    print("\n--- Scheduler Task Finished ---")
     return "Scheduler ran successfully", 200
 
 # -----------------------------------------------------------
-# Flask 啟動
+# Flask 啟動 (本地測試用)
 
 if __name__ == "__main__":
+    # ✅ 優化：將預設 Port 統一為 8080
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
