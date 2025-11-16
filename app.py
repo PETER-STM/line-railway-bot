@@ -1,7 +1,9 @@
 # app.py - Line Bot Webhook 處理和資料庫互動 (Line SDK V2 最終版)
 
+# 强制 Git 偵測變更，確保成功部署。 <--- 在這裡新增這行註解
 import os
 import re
+# ... (其他程式碼不變)
 import psycopg2
 from datetime import datetime
 from flask import Flask, request, abort 
