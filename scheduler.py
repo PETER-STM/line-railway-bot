@@ -1,4 +1,4 @@
-# scheduler.py - 排程應用程式 (Line SDK V2 最終版)
+# scheduler.py - 排程應用程式 (LINE SDK V2 最終穩定版)
 
 import os
 import re
@@ -9,15 +9,12 @@ from flask import Flask, request, abort
 # 【V2 核心】導入 Line SDK V2 類別
 # =========================================================
 from linebot import LineBotApi
+# V2 例外名稱不同，直接從 linebot.exceptions 導入
 from linebot.exceptions import LineBotApiError as ApiException 
 from linebot.models import TextMessage
 
 # --- Line Bot Setup ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-
-if not LINE_CHANNEL_ACCESS_TOKEN:
-    print("Error: Line tokens are not set in environment variables.")
-    pass 
 
 # V2: 建立客戶端
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)

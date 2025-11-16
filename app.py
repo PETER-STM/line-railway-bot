@@ -1,29 +1,28 @@
-# scheduler.py - 排程應用程式 (Line SDK V2 最終版)
+# app.py - Line Bot Webhook 處理和資料庫互動 (LINE SDK V2 最終穩定版)
 
 import os
 import re
 import psycopg2
 from datetime import datetime
 from flask import Flask, request, abort 
+
 # =========================================================
 # 【V2 核心】導入 Line SDK V2 類別
 # =========================================================
-from linebot import LineBotApi
-# V2 例外名稱不同，直接從 linebot.exceptions 導入
-from linebot.exceptions import LineBotApiError as ApiException 
-from linebot.models import TextMessage
+from linebot import LineBotApi, WebhookHandler
+# 修正：V2 只導入 TextMessage (V2 中沒有 TextMessageContent)
+from linebot.exceptions import InvalidSignatureError, LineBotApiError 
+from linebot.models import MessageEvent, TextMessage 
 
 # --- Line Bot Setup ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
 
-if not LINE_CHANNEL_ACCESS_TOKEN:
-    print("Error: Line tokens are not set in environment variables.")
-    pass 
-
-# V2: 建立客戶端
+# V2: 建立客戶端和 Handler
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET) 
 
-# Flask 應用初始化 (這裡只需要一個簡單的 Flask 應用來啟動 Worker)
+# Flask 應用初始化
 app = Flask(__name__)
 
 # --- 資料庫連線函式 (保持不變) ---
@@ -50,83 +49,157 @@ def get_db_connection():
         print(f"Database connection failed: {e}")
         return None
 
-# --- 資料庫操作：獲取群組列表 (保持不變) ---
-def get_groups_with_missing_reports():
+# --- 資料庫操作：新增人名 ---
+def add_reporter(source_id, name):
     conn = get_db_connection()
     if not conn:
-        print("Scheduler: DB connection failed.")
-        return {}
+        return False, "❌ 資料庫儲存失敗，請聯繫管理員檢查 DB 連線。"
 
     try:
         cur = conn.cursor()
-        
-        # 1. 獲取所有群組和回報人
-        cur.execute("SELECT group_id, reporter_name FROM group_reporters")
-        all_reporters = cur.fetchall()
-        
-        # 2. 獲取今天已經回報的名單
-        today_date = datetime.now().date()
-        sql_today = "SELECT source_id, name FROM reports WHERE report_date = %s"
-        cur.execute(sql_today, (today_date,))
-        reported_today = cur.fetchall()
-        
-        reported_set = set((source_id, name) for source_id, name in reported_today)
-        
-        # 3. 找出所有未回報的名單
-        missing_reports = {}
-        for group_id, reporter_name in all_reporters:
-            if (group_id, reporter_name) not in reported_set:
-                if group_id not in missing_reports:
-                    missing_reports[group_id] = []
-                missing_reports[group_id].append(reporter_name)
-                
+        sql = "INSERT INTO group_reporters (group_id, reporter_name) VALUES (%s, %s)"
+        cur.execute(sql, (source_id, name))
+        conn.commit()
         cur.close()
-        return missing_reports
+        return True, f"✅ 已成功新增：**{name}** 為回報人！"
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        return False, f"⚠️ **{name}** 已經是本群組的回報人了！"
     except Exception as e:
-        print(f"Scheduler DB error: {e}")
-        return {}
+        conn.rollback()
+        print(f"Error adding reporter: {e}")
+        return False, "❌ 資料庫儲存失敗，請聯繫管理員檢查 DB 連線。"
     finally:
         if conn: conn.close()
 
-# --- 排程任務邏輯 ---
-def send_daily_reminder():
-    """發送每日未回報提醒到各群組"""
-    
-    missing_data = get_groups_with_missing_reports()
-    
-    if not missing_data:
-        print("Scheduler: No missing reports found today.")
-        return
-        
-    for group_id, reporters in missing_data.items():
-        if reporters:
-            reporters_list = "、".join(reporters)
-            message = f"🔔 **每日回報提醒**\n\n今天 (**{datetime.now().strftime('%Y/%m/%d')}**) 尚未回報的成員有：\n\n{reporters_list}\n\n請記得在 LINE 群組中輸入：\n`YYYY.MM.DD 您的名字` 進行回報！"
-            
-            print(f"Sending reminder to group {group_id} for: {reporters_list}")
-            
-            try:
-                # V2: 使用 line_bot_api.push_message
-                line_bot_api.push_message(
-                    to=group_id,
-                    messages=TextMessage(text=message) # V2 的 messages 參數可以是單一物件
-                )
-            except ApiException as e:
-                print(f"Failed to send message to {group_id}: {e}")
-            except Exception as e:
-                print(f"Unexpected error when pushing message: {e}")
+# --- 資料庫操作：刪除人名 ---
+def delete_reporter(source_id, name):
+    conn = get_db_connection()
+    if not conn:
+        return False, "❌ 資料庫連線失敗，無法執行刪除。"
 
-# --- Worker 啟動點 (用於 Procfile 中的 worker: 命令) ---
-@app.route("/run_scheduler")
-def run_scheduler():
-    """手動觸發排程（可作為 Cron Job Endpoint）"""
-    print("--- Scheduler Task Started ---\n")
-    send_daily_reminder()
-    print("\n--- Scheduler Task Finished ---")
-    return "Scheduler ran successfully", 200
+    try:
+        cur = conn.cursor()
+        sql = "DELETE FROM group_reporters WHERE group_id = %s AND reporter_name = %s"
+        cur.execute(sql, (source_id, name))
+        
+        if cur.rowcount > 0:
+            conn.commit()
+            cur.close()
+            return True, f"🗑️ 已成功刪除：**{name}**。"
+        else:
+            conn.rollback()
+            cur.close()
+            return False, f"⚠️ 查無此人：**{name}** 不在本群組的回報人名單中。"
+            
+    except Exception as e:
+        conn.rollback()
+        print(f"Error deleting reporter: {e}")
+        return False, "❌ 資料庫操作失敗，請聯繫管理員。"
+    finally:
+        if conn: conn.close()
+
+# --- 資料庫操作：儲存回報 ---
+def save_report(report_date, name, source_id):
+    conn = get_db_connection()
+    if not conn:
+        return False
+
+    try:
+        cur = conn.cursor()
+        sql = "INSERT INTO reports (report_date, name, source_id) VALUES (%s, %s, %s)"
+        cur.execute(sql, (report_date, name, source_id))
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        conn.rollback()
+        print(f"Error saving report: {e}")
+        return False
+    finally:
+        if conn: conn.close()
 
 # -----------------------------------------------------------
-# Flask 啟動 (本地測試用)
+# Flask Webhook 路由 (使用 V2 WebhookHandler 處理請求)
+
+@app.route("/callback", methods=['POST'])
+def callback():
+    signature = request.headers.get('X-Line-Signature', '')
+    body = request.get_data(as_text=True)
+    
+    try:
+        # V2: 使用 handler.handle 呼叫被裝飾的函式
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        print("Invalid signature. Check your channel secret.")
+        abort(400)
+    except Exception as e:
+        print(f"Webhook handling error: {e}")
+        return 'OK' 
+
+    return 'OK'
+
+# -----------------------------------------------------------
+# Line 訊息處理邏輯 (使用 WebhookHandler Decorator)
+
+@handler.add(MessageEvent, message=TextMessage) # <-- V2 修正
+def handle_text_message(event):
+    """處理接收到的 Line 文本訊息事件 (由 WebhookHandler 自動觸發)"""
+    
+    text = event.message.text.strip()
+    # 統一獲取來源 ID (群組或用戶) - V2 獲取方式
+    source_id = event.source.group_id if hasattr(event.source, 'group_id') else \
+                (event.source.room_id if hasattr(event.source, 'room_id') else event.source.user_id) 
+
+    reply_message = None
+
+    # 1. 處理「新增人名」指令
+    match_add = re.match(r'^\s*新增人名\s+([^\n\r]+)', text)
+    if match_add:
+        name_to_add = match_add.group(1).strip()
+        success, message = add_reporter(source_id, name_to_add)
+        reply_message = TextMessage(text=message)
+        
+    # 2. 處理「刪除人名」指令
+    elif match_delete := re.match(r'^\s*刪除人名\s+([^\n\r]+)', text):
+        name_to_delete = match_delete.group(1).strip()
+        success, message = delete_reporter(source_id, name_to_delete)
+        reply_message = TextMessage(text=message)
+    
+    # 3. 處理「回報」指令
+    elif match_report := re.match(r'^\s*(\d{4}[./]\d{1,2}[./]\d{1,2})\s*（[^）]+）?\s*([^\n\r]+)', text):
+        date_str = match_report.group(1).replace('/', '.')
+        name = match_report.group(2).strip()
+        
+        try:
+            report_date = datetime.strptime(date_str, '%Y.%m.%d').date()
+        except ValueError:
+            reply_message = TextMessage(text="❌ 日期格式錯誤。請使用 YYYY.MM.DD 格式。")
+        else:
+            if save_report(report_date, name, source_id):
+                reply_message = TextMessage(text=f"✅ 紀錄成功！\n回報者: **{name}**\n日期: **{report_date.strftime('%Y/%m/%d')}**\n\n感謝您的回報！")
+            else:
+                reply_message = TextMessage(text="❌ 資料庫儲存失敗，請聯繫管理員檢查 DB 連線。")
+        
+    # 4. 如果有需要回覆的訊息，嘗試回覆
+    if reply_message:
+        try:
+            # V2 API Call: line_bot_api.reply_message
+            line_bot_api.reply_message(
+                event.reply_token,
+                reply_message
+            )
+        # 捕捉 V2 API 錯誤，並打印詳細資訊到日誌
+        except LineBotApiError as e: 
+            print(f"============================================================")
+            print(f"🚨 LINE API 回覆失敗！請檢查 Channel Access Token 和 Secret！")
+            print(f"LINE API Error: {e.status_code} - {e.error.message}")
+            print(f"============================================================")
+        except Exception as e:
+            print(f"🚨 意外錯誤：回覆訊息時發生例外：{e}")
+    
+    # 5. 處理「雜訊」（非指令訊息）
+    return 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
