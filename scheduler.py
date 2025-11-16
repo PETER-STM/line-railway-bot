@@ -8,10 +8,10 @@ from flask import Flask, request, abort
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, TextMessage, ApiException
 
 # =========================================================
-# 【最終修正】Line SDK V3 導入：移除 WebhookParser 相關代碼
+# 【最終解決】Line SDK V3 導入：移除所有 Webhook 處理相關類別
 # =========================================================
-# 這裡只需要 Line SDK 錯誤處理和訊息類型，不需 WebhookHandler 或 WebhookParser
-from linebot.v3.exceptions import InvalidSignatureError
+# Worker 服務不處理 Webhook，只需錯誤處理
+from linebot.v3.exceptions import InvalidSignatureError 
 
 # --- Line Bot Setup ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
@@ -134,6 +134,5 @@ def run_scheduler():
 # Flask 啟動 (本地測試用)
 
 if __name__ == "__main__":
-    # ✅ 優化：將預設 Port 統一為 8080
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)

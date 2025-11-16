@@ -7,11 +7,13 @@ from datetime import datetime
 from flask import Flask, request, abort 
 
 # =========================================================
-# 【最終修正】Line SDK V3 導入：使用 WebhookHandler
+# 【最終解決】Line SDK V3 導入：使用 linebot.v3.parser.WebhookParser
 # =========================================================
 from linebot.v3.messaging import Configuration, ApiClient, MessagingApi, TextMessage
-# ✅ 將 WebhookParser 替換為 WebhookHandler
-from linebot.v3.webhooks import WebhookHandler, MessageEvent, TextMessageContent 
+# 導入事件類別
+from linebot.v3.webhooks import MessageEvent, TextMessageContent 
+# ✅ 從 linebot.v3.parser 導入 WebhookParser (解決路徑衝突的根源)
+from linebot.v3.parser import WebhookParser
 from linebot.v3.exceptions import InvalidSignatureError, ApiException 
 
 # --- Line Bot Setup ---
@@ -27,9 +29,8 @@ configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 api_client = ApiClient(configuration)
 line_messaging_api = MessagingApi(api_client)
 
-# V3: 使用 WebhookHandler 
-# ❗ 注意：WebhookHandler 需要 channel secret 和 MessagingApi 實例
-handler = WebhookHandler(LINE_CHANNEL_SECRET, line_messaging_api) 
+# V3: 使用 WebhookParser
+parser = WebhookParser(LINE_CHANNEL_SECRET) 
 
 # Flask 應用初始化
 app = Flask(__name__)
@@ -40,7 +41,6 @@ def get_db_connection():
     conn_url = os.environ.get("DATABASE_URL")
     if conn_url:
         try:
-            # 確保使用 DSN 連線
             return psycopg2.connect(conn_url)
         except Exception as e:
             print(f"Database connection via DATABASE_URL failed: {e}")
@@ -130,12 +130,11 @@ def save_report(report_date, name, source_id):
         if conn: conn.close()
 
 
-# --- Line 訊息處理邏輯 (現在由 WebhookHandler 處理) ---
-@handler.add(MessageEvent, message=TextMessageContent)
+# --- Line 訊息處理邏輯 ---
 def handle_message(event):
     """處理接收到的 Line 文本訊息事件"""
     text = event.message.text.strip()
-    source_id = event.source.user_id if event.source.user_id else event.source.group_id # 統一獲取來源 ID
+    source_id = event.source.group_id if hasattr(event.source, 'group_id') else event.source.user_id 
 
     # 1. 處理「新增人名」指令
     match_add = re.match(r'^\s*新增人名\s+([^\n\r]+)', text)
@@ -190,7 +189,7 @@ def handle_message(event):
     return 
 
 # -----------------------------------------------------------
-# Flask Webhook 路由 (使用 WebhookHandler 處理事件)
+# Flask Webhook 路由 (使用 WebhookParser 解析事件)
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -198,8 +197,8 @@ def callback():
     body = request.get_data(as_text=True)
     
     try:
-        # V3: 使用 handler.handle 解析請求體和簽名
-        handler.handle(body, signature)
+        # V3: 使用 parser.parse 解析請求體和簽名
+        events = parser.parse(body, signature)
     except InvalidSignatureError:
         print("Invalid signature. Check your channel secret.")
         abort(400)
@@ -207,7 +206,17 @@ def callback():
         print(f"Webhook parsing error: {e}")
         return 'OK' 
 
-    # 處理邏輯已移動到 @handler.add 裝飾的函式中
+    # 遍歷所有解析出來的事件
+    for event in events:
+        try:
+            # 僅處理 MessageEvent 且內容是 TextMessageContent 的事件
+            if isinstance(event, MessageEvent) and isinstance(event.message, TextMessageContent):
+                handle_message(event) # 直接呼叫處理函式
+        except ApiException as e:
+            print(f"Line API Error during event handling: {e}")
+        except Exception as e:
+            print(f"Unexpected error during event handling: {e}")
+            
     return 'OK'
 
 if __name__ == "__main__":
