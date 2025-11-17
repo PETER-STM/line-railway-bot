@@ -145,8 +145,7 @@ def save_report(group_id, report_date_str, reporter_name):
             # 檢查當天是否已回報過
             cur.execute("SELECT * FROM reports WHERE source_id = %s AND report_date = %s AND name = %s;", (group_id, report_date, reporter_name))
             if cur.fetchone():
-                return f"⚠️ **{reporter_name}** 已經回報過 {report_date_str} 的記錄了！"
-
+                return f"🌟 **{reporter_name}** 已經在 {report_date_str} 完成回報，無需重複提交！"
             # 儲存回報
             cur.execute("INSERT INTO reports (source_id, report_date, name) VALUES (%s, %s, %s);", (group_id, report_date, reporter_name))
             conn.commit()
