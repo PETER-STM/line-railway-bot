@@ -141,13 +141,11 @@ def save_report(group_id, report_date_str, reporter_name):
             cur.execute("SELECT group_id FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
             if not cur.fetchone():
                 return f"❌ **{reporter_name}** 不在回報人名單中，請先使用 **新增人名 {reporter_name}** 加入！"
-
-            # 檢查當天是否已回報過
+# 檢查當天是否已回報過
             cur.execute("SELECT * FROM reports WHERE source_id = %s AND report_date = %s AND name = %s;", (group_id, report_date, reporter_name))
             if cur.fetchone():
-                return f"🌟 **{reporter_name}** 已經在 {report_date_str} 完成回報，無需重複提交！"
-            # 儲存回報
-            cur.execute("INSERT INTO reports (source_id, report_date, name) VALUES (%s, %s, %s);", (group_id, report_date, reporter_name))
+                # 使用「狀態已完成」來代替「已回報過記錄」
+                return f"✅ **{reporter_name}** {report_date_str} 的回報狀態：**已完成**，請勿再次操作。"            cur.execute("INSERT INTO reports (source_id, report_date, name) VALUES (%s, %s, %s);", (group_id, report_date, reporter_name))
             conn.commit()
             return f"🎉 **{reporter_name}** 成功回報 {report_date_str}！"
     except Exception as e:
