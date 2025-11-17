@@ -96,7 +96,7 @@ def delete_reporter(group_id, reporter_name):
     finally:
         conn.close()
 
-# --- 資料庫操作：獲取回報人名單 ---
+# --- 資料庫操作：獲取回報人名單 (已移除管理提示) ---
 def get_reporter_list(group_id):
     conn = get_db_connection()
     if conn is None:
@@ -114,7 +114,7 @@ def get_reporter_list(group_id):
             # 格式化輸出
             list_text = "📋 **當前回報人名單：**\n\n"
             list_text += "\n".join([f"🔸 {name}" for name in reporters])
-            list_text += "\n\n(使用 **新增人名 [人名]** 或 **刪除人名 [人名]** 進行管理)"
+            # 管理提示已移除
             
             return list_text
     except Exception as e:
@@ -145,7 +145,7 @@ def save_report(group_id, report_date_str, reporter_name):
             # 檢查當天是否已回報過
             cur.execute("SELECT * FROM reports WHERE source_id = %s AND report_date = %s AND name = %s;", (group_id, report_date, reporter_name))
             if cur.fetchone():
-                # 最終修正：避免給人「登記」的僥倖心態，使用中性確認語氣
+                # 最終 UX 修正：使用中性確認語氣，避免給人「登記」的僥倖心態
                 return f"✅ **{reporter_name}** {report_date_str} 的回報狀態：**已完成**，請勿再次操作。"
 
             # 儲存回報
@@ -230,7 +230,7 @@ def get_all_reporters(conn):
     all_reporters = cur.fetchall()
     return all_reporters
 
-# 核心邏輯：發送每日提醒
+# 核心邏輯：發送每日提醒 (包含最終語氣修正)
 def send_daily_reminder(line_bot_api):
     conn = get_db_connection()
     if conn is None:
@@ -266,9 +266,11 @@ def send_daily_reminder(line_bot_api):
 
             # 如果有未回報的人，則發送提醒
             if missing_reports:
-                message_text = f"🚨 **{check_date_str}** 回報提醒！以下成員尚未回報：\n\n"
+                # 最終 UX 修正：使用更人性化的提醒語氣
+                message_text = f"回報提醒：{check_date_str}\n\n"
+                message_text += "以下成員仍在等待回覆 👇\n\n"
                 message_text += "\n".join([f"👉 {name}" for name in missing_reports])
-                message_text += "\n\n請儘快回報！"
+                message_text += "\n\n麻煩各位儘快補上進度，感謝協助 🙏"
                 
                 try:
                     line_bot_api.push_message(group_id, TextSendMessage(text=message_text))
