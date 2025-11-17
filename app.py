@@ -143,7 +143,8 @@ def handle_message(event):
             reply_text = add_reporter(group_id, reporter_name)
 
         # 2. 處理「YYYY.MM.DD 人名」回報指令
-        match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s+(.+)$", text)
+        # 修正 Regex: 允許日期後到人名之間有任意字符 (例如 (日), (Mon) 等)
+        match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s*.*?(\w+)$", text)
         if match_report:
             date_str = match_report.group(1)
             reporter_name = match_report.group(2).strip()
