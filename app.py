@@ -17,8 +17,9 @@ DATABASE_URL = os.environ.get('DATABASE_URL')
 # --- 診斷程式碼 (確認環境變數載入成功) ---
 try:
     if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET or not DATABASE_URL:
-        print("ERROR: Missing required environment variables!", file=sys.stderr)
+        print("ERROR: Missing required environment variables!T", file=sys.stderr)
     else:
+        # 打印這些變數的長度 (確認它們不為空)
         print(f"LINE_SECRET length: {len(LINE_CHANNEL_SECRET)}", file=sys.stderr)
         print(f"LINE_TOKEN length: {len(LINE_CHANNEL_ACCESS_TOKEN)}", file=sys.stderr)
         print(f"DB_URL length: {len(DATABASE_URL)}", file=sys.stderr)
@@ -96,7 +97,7 @@ def delete_reporter(group_id, reporter_name):
     finally:
         conn.close()
 
-# --- 資料庫操作：獲取回報人名單 (情緒價值優化) ---
+# --- 資料庫操作：獲取回報人名單 (標題簡化) ---
 def get_reporter_list(group_id):
     conn = get_db_connection()
     if conn is None:
@@ -112,7 +113,7 @@ def get_reporter_list(group_id):
                 return "📋 目前名單空空如也！快來當第一個回報者吧！使用 **新增人名 [人名]** 啟動您的進度追蹤！🚀"
             
             # 格式化輸出
-            list_text = "⭐ **本團隊閃亮亮回報名單：**\n\n"
+            list_text = "⭐ 本團隊回報名單：\n\n"
             list_text += "\n".join([f"🔸 {name}" for name in reporters])
             
             return list_text
@@ -176,7 +177,7 @@ def callback():
     
     return 'OK'
 
-# --- 訊息處理：接收訊息事件 (最終 Regex 修正：隔離星期幾) ---
+# --- 訊息處理：接收訊息事件 (Regex 修正：隔離星期幾) ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     # 關鍵修正: 只使用訊息的第一行來匹配指令
@@ -206,10 +207,8 @@ def handle_message(event):
             reply_text = get_reporter_list(group_id)
 
         # 2. 處理「YYYY.MM.DD [星期幾] [人名]」回報指令
-        # 最終修正 Regex:
-        # Group 1: (\d{4}\.\d{2}\.\d{2}) -> 日期
-        # (?:...)?: 匹配並拋棄選用的 (一) 到 (日) 標記
-        # Group 2: (.+) -> 擷取剩下的所有內容作為純粹的人名
+        # 最終修正 Regex: 匹配並拋棄選用的 (一) 到 (日) 標記
+        # Group 1: 日期，Group 2: 純粹的人名
         regex_pattern = r"^(\d{4}\.\d{2}\.\d{2})\s*(?:[\s　]*[（(][\s\w\u4e00-\u9fff]+[)）])?\s*(.+)$"
         match_report = re.match(regex_pattern, text_to_match)
 
@@ -236,7 +235,7 @@ def get_all_reporters(conn):
     all_reporters = cur.fetchall()
     return all_reporters
 
-# 核心邏輯：發送每日提醒 (包含情緒價值優化)
+# --- 核心邏輯：發送每日提醒 (包含情緒價值優化 - 根據使用者提供的模板) ---
 def send_daily_reminder(line_bot_api):
     conn = get_db_connection()
     if conn is None:
@@ -272,16 +271,38 @@ def send_daily_reminder(line_bot_api):
 
             # 如果有未回報的人，則發送提醒
             if missing_reports:
-                # 最終 UX 修正：使用更人性化的提醒語氣，包含情緒價值
-                message_text = f"⏰ 緊急提醒：{check_date_str} 的進度追蹤！\n\n"
-                message_text += "以下成員仍在等待回覆 👇\n\n"
-                message_text += "\n".join([f"👉 {name}" for name in missing_reports])
-                message_text += "\n\n麻煩各位儘快補上進度，讓大家看看您的成果吧！感謝協助 🙏"
+                
+                # --- 新的情緒化提醒邏輯 ---
+                is_singular = len(missing_reports) == 1
+                
+                # Part 1: Header and Missing List
+                message_text = f"⏰ 緊急提醒：{check_date_str} 進度追蹤\n"
+                message_text += "以下成員還沒回覆 👇\n\n"
+                
+                missing_list_text = "\n".join([f"👉 {name}" for name in missing_reports])
+                message_text += missing_list_text
+                
+                if is_singular:
+                    # 單人訊息：使用「你」
+                    message_text += "\n\n大家都在等你的進度啦～\n"
+                    message_text += "\n不著急，但你再不回，我可能就要開始懷疑你是不是打算\n"
+                    message_text += "把錢藏起來不讓我們看到 😏\n"
+                    message_text += "麻煩儘快補上，\n\n"
+                    message_text += "讓我們能安心，也讓你的荷包不會變成大家關注的焦點喔 🙏✨"
+                else:
+                    # 多人訊息：使用「你們」
+                    message_text += "\n\n大家都在等你們的進度啦～\n"
+                    message_text += "\n不著急，但你們再不回，我可能就要開始懷疑是不是有人打算\n"
+                    message_text += "把錢藏起來不讓我們看到 😏\n"
+                    message_text += "麻煩儘快補上，\n\n"
+                    message_text += "讓我們能安心，也讓你們的荷包不會變成關注的焦點喔 🙏✨"
+                # --- 新的情緒化提醒邏輯結束 ---
                 
                 try:
                     line_bot_api.push_message(group_id, TextSendMessage(text=message_text))
                     print(f"Sent reminder to group {group_id} for {len(missing_reports)} missing reports.", file=sys.stderr)
                 except LineBotApiError as e:
+                    # 如果 Bot 不在群組中，會引發錯誤
                     print(f"LINE API PUSH ERROR to {group_id}: {e}", file=sys.stderr)
                     
     except Exception as e:
