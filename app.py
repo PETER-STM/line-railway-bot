@@ -46,7 +46,7 @@ def get_db_connection():
         print(f"DATABASE CONNECTION ERROR: {e}", file=sys.stderr)
         return None
 
-# --- 資料庫操作：新增回報人 ---
+# --- 資料庫操作：新增回報人 (情緒價值優化) ---
 def add_reporter(group_id, reporter_name):
     conn = get_db_connection()
     if conn is None:
@@ -56,11 +56,11 @@ def add_reporter(group_id, reporter_name):
         with conn.cursor() as cur:
             cur.execute("SELECT group_id FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
             if cur.fetchone():
-                return f"⚠️ **{reporter_name}** 已經是回報人！"
+                return f"😉 哎呀，**{reporter_name}** 已經在名單中囉！感謝您的熱情！🔥"
 
             cur.execute("INSERT INTO group_reporters (group_id, reporter_name) VALUES (%s, %s);", (group_id, reporter_name))
             conn.commit()
-            return f"✅ 已成功新增：**{reporter_name}** 為回報人！"
+            return f"🥳 太棒了！歡迎 **{reporter_name}** 加入回報名單！從今天起一起努力吧！💪"
     except Exception as e:
         conn.rollback()
         print(f"DB ERROR (add_reporter): {e}", file=sys.stderr)
@@ -68,7 +68,7 @@ def add_reporter(group_id, reporter_name):
     finally:
         conn.close()
 
-# --- 資料庫操作：刪除回報人 ---
+# --- 資料庫操作：刪除回報人 (情緒價值優化) ---
 def delete_reporter(group_id, reporter_name):
     conn = get_db_connection()
     if conn is None:
@@ -79,7 +79,7 @@ def delete_reporter(group_id, reporter_name):
             # 檢查是否存在
             cur.execute("SELECT group_id FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
             if not cur.fetchone():
-                return f"⚠️ **{reporter_name}** 不在回報人名單中，無法刪除！"
+                return f"🤔 咦？我查了一下，**{reporter_name}** 不在回報人名單上耶。是不是名字打錯了呢？請再檢查一下喔！"
 
             # 刪除回報人
             cur.execute("DELETE FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
@@ -88,7 +88,7 @@ def delete_reporter(group_id, reporter_name):
             cur.execute("DELETE FROM reports WHERE source_id = %s AND name = %s;", (group_id, reporter_name))
 
             conn.commit()
-            return f"🗑️ 已成功刪除：**{reporter_name}**，並清除了所有歷史回報記錄。"
+            return f"👋 好的，我們已經跟 **{reporter_name}** 說掰掰了，資料庫也順利清空。管理名單完成！🧹"
     except Exception as e:
         conn.rollback()
         print(f"DB ERROR (delete_reporter): {e}", file=sys.stderr)
@@ -96,7 +96,7 @@ def delete_reporter(group_id, reporter_name):
     finally:
         conn.close()
 
-# --- 資料庫操作：獲取回報人名單 (已移除管理提示) ---
+# --- 資料庫操作：獲取回報人名單 (情緒價值優化) ---
 def get_reporter_list(group_id):
     conn = get_db_connection()
     if conn is None:
@@ -109,10 +109,10 @@ def get_reporter_list(group_id):
             reporters = [row[0] for row in cur.fetchall()]
             
             if not reporters:
-                return "👥 目前名單中沒有任何回報人。請使用 **新增人名 [人名]** 來加入。"
+                return "📋 目前名單空空如也！快來當第一個回報者吧！使用 **新增人名 [人名]** 啟動您的進度追蹤！🚀"
             
             # 格式化輸出
-            list_text = "📋 **當前回報人名單：**\n\n"
+            list_text = "⭐ **本團隊閃亮亮回報名單：**\n\n"
             list_text += "\n".join([f"🔸 {name}" for name in reporters])
             # 管理提示已移除
             
@@ -124,7 +124,7 @@ def get_reporter_list(group_id):
     finally:
         conn.close()
 
-# --- 資料庫操作：儲存回報 (包含最終語氣修正) ---
+# --- 資料庫操作：儲存回報 (情緒價值優化) ---
 def save_report(group_id, report_date_str, reporter_name):
     conn = get_db_connection()
     if conn is None:
@@ -133,25 +133,25 @@ def save_report(group_id, report_date_str, reporter_name):
     try:
         report_date = datetime.strptime(report_date_str, '%Y.%m.%d').date()
     except ValueError:
-        return "⚠️ 日期格式錯誤，請使用 **YYYY.MM.DD** 格式！"
+        return "📆 日期格式小錯誤！別擔心，請記得使用 **YYYY.MM.DD** 這種格式喔！例如：2025.11.17。"
 
     try:
         with conn.cursor() as cur:
             # 檢查回報人是否在名單中
             cur.execute("SELECT group_id FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
             if not cur.fetchone():
-                return f"❌ **{reporter_name}** 不在回報人名單中，請先使用 **新增人名 {reporter_name}** 加入！"
+                return f"🧐 **{reporter_name}** 看起來您還沒加入回報名單呢！請先用 **新增人名 {reporter_name}** 讓我認識您一下喔！😊"
 
             # 檢查當天是否已回報過
             cur.execute("SELECT * FROM reports WHERE source_id = %s AND report_date = %s AND name = %s;", (group_id, report_date, reporter_name))
             if cur.fetchone():
                 # 最終 UX 修正：使用中性確認語氣，避免給人「登記」的僥倖心態
-                return f"✅ **{reporter_name}** {report_date_str} 的回報狀態：**已完成**，請勿再次操作。"
+                return f"👍 效率超高！**{reporter_name}** {report_date_str} 的回報狀態早已是 **已完成** 囉！不用再操作啦，您休息一下吧！☕"
 
             # 儲存回報
             cur.execute("INSERT INTO reports (source_id, report_date, name) VALUES (%s, %s, %s);", (group_id, report_date, reporter_name))
             conn.commit()
-            return f"🎉 **{reporter_name}** 成功回報 {report_date_str}！"
+            return f"✨ 成功！**{reporter_name}** 您今天做得非常棒！{report_date_str} 的進度已完美記錄！💯"
     except Exception as e:
         conn.rollback()
         print(f"DB ERROR (save_report): {e}", file=sys.stderr)
@@ -159,7 +159,7 @@ def save_report(group_id, report_date_str, reporter_name):
     finally:
         conn.close()
 
-# --- Webhook 路由 ---
+# --- Webhook 路由 (不變) ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -177,7 +177,7 @@ def callback():
     
     return 'OK'
 
-# --- 訊息處理：接收訊息事件 (修復多行輸入和空格問題) ---
+# --- 訊息處理：接收訊息事件 (不變) ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     # 關鍵修正: 只使用訊息的第一行來匹配指令
@@ -194,16 +194,19 @@ def handle_message(event):
         match_add = re.match(r"^新增人名[\s　]+(.+)$", text_to_match)
         if match_add:
             reporter_name = match_add.group(1).strip()
+            # 調用已優化的 add_reporter
             reply_text = add_reporter(group_id, reporter_name)
 
         # 1.5 處理「刪除人名 [人名]」指令 (修復全形/多個空格)
         match_delete = re.match(r"^刪除人名[\s　]+(.+)$", text_to_match)
         if match_delete:
             reporter_name = match_delete.group(1).strip()
+            # 調用已優化的 delete_reporter
             reply_text = delete_reporter(group_id, reporter_name)
 
         # 1.6 處理「查詢名單 / 查看人員」指令
         if text_to_match in ["查詢名單", "查看人員", "名單", "list"]:
+            # 調用已優化的 get_reporter_list
             reply_text = get_reporter_list(group_id)
 
         # 2. 處理「YYYY.MM.DD [其他字元] 人名」回報指令
@@ -211,6 +214,7 @@ def handle_message(event):
         if match_report:
             date_str = match_report.group(1)
             reporter_name = match_report.group(2).strip()
+            # 調用已優化的 save_report
             reply_text = save_report(group_id, date_str, reporter_name)
 
         # 回覆訊息
@@ -223,14 +227,14 @@ def handle_message(event):
 
 # --- START SCHEDULER LOGIC ---
 
-# 輔助函數：獲取所有回報人名單
+# 輔助函數：獲取所有回報人名單 (不變)
 def get_all_reporters(conn):
     cur = conn.cursor()
     cur.execute("SELECT group_id, reporter_name FROM group_reporters ORDER BY group_id;")
     all_reporters = cur.fetchall()
     return all_reporters
 
-# 核心邏輯：發送每日提醒 (包含最終語氣修正)
+# 核心邏輯：發送每日提醒 (情緒價值優化)
 def send_daily_reminder(line_bot_api):
     conn = get_db_connection()
     if conn is None:
@@ -266,11 +270,11 @@ def send_daily_reminder(line_bot_api):
 
             # 如果有未回報的人，則發送提醒
             if missing_reports:
-                # 最終 UX 修正：使用更人性化的提醒語氣
-                message_text = f"回報提醒：{check_date_str}\n\n"
+                # 最終 UX 修正：使用更人性化的提醒語氣，包含情緒價值
+                message_text = f"⏰ 緊急提醒：{check_date_str} 的進度追蹤！\n\n"
                 message_text += "以下成員仍在等待回覆 👇\n\n"
                 message_text += "\n".join([f"👉 {name}" for name in missing_reports])
-                message_text += "\n\n麻煩各位儘快補上進度，感謝協助 🙏"
+                message_text += "\n\n麻煩各位儘快補上進度，讓大家看看您的成果吧！感謝協助 🙏"
                 
                 try:
                     line_bot_api.push_message(group_id, TextSendMessage(text=message_text))
@@ -287,7 +291,7 @@ def send_daily_reminder(line_bot_api):
     return "Scheduler execution finished successfully."
 
 
-# --- 新增的排程觸發路由 ---
+# --- 新增的排程觸發路由 (不變) ---
 @app.route("/run_scheduler")
 def run_scheduler_endpoint():
     result = send_daily_reminder(line_bot_api)
@@ -296,6 +300,6 @@ def run_scheduler_endpoint():
 # --- END SCHEDULER LOGIC ---
 
 
-# --- 啟動 Flask 應用程式 ---
+# --- 啟動 Flask 應用程式 (不變) ---
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=os.getenv('PORT', 8080))
