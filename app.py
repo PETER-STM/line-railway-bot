@@ -1,7 +1,7 @@
 import os
 import sys
 import re
-from datetime import datetime, timedelta  # 確保導入 timedelta
+from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
@@ -14,12 +14,11 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
-# --- 診斷程式碼 ---
+# --- 診斷程式碼 (確認環境變數載入成功) ---
 try:
     if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET or not DATABASE_URL:
         print("ERROR: Missing required environment variables!", file=sys.stderr)
     else:
-        # 打印這些變數的長度 (確認它們不為空)
         print(f"LINE_SECRET length: {len(LINE_CHANNEL_SECRET)}", file=sys.stderr)
         print(f"LINE_TOKEN length: {len(LINE_CHANNEL_ACCESS_TOKEN)}", file=sys.stderr)
         print(f"DB_URL length: {len(DATABASE_URL)}", file=sys.stderr)
@@ -42,7 +41,7 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # --- 資料庫連線函式 ---
 def get_db_connection():
     try:
-        # 強制使用 SSL mode='require'，以確保與 Railway 資料庫的連線穩定
+        # 修正：強制使用 SSL mode='require'，以確保與 Railway 資料庫的連線穩定
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         return conn
     except Exception as e:
@@ -50,7 +49,7 @@ def get_db_connection():
         print(f"DATABASE CONNECTION ERROR: {e}", file=sys.stderr)
         return None
 
-# --- 資料庫操作：新增回報人 ---
+# --- 資料庫操作：新增回報人 (group_reporters 表使用 group_id) ---
 def add_reporter(group_id, reporter_name):
     conn = get_db_connection()
     if conn is None:
@@ -58,12 +57,12 @@ def add_reporter(group_id, reporter_name):
 
     try:
         with conn.cursor() as cur:
-            # 檢查是否已存在 (使用 group_reporters 表，欄位為 group_id)
+            # 檢查是否已存在
             cur.execute("SELECT group_id FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
             if cur.fetchone():
                 return f"⚠️ **{reporter_name}** 已經是回報人！"
 
-            # 插入新回報人 (使用 group_reporters 表，欄位為 group_id)
+            # 插入新回報人
             cur.execute("INSERT INTO group_reporters (group_id, reporter_name) VALUES (%s, %s);", (group_id, reporter_name))
             conn.commit()
             return f"✅ 已成功新增：**{reporter_name}** 為回報人！"
