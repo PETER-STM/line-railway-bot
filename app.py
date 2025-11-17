@@ -1,206 +1,172 @@
-# app.py - Line Bot Webhook 處理和資料庫互動 (LINE SDK V2 最終穩定版)
-
 import os
+import sys
 import re
-import psycopg2
 from datetime import datetime
-from flask import Flask, request, abort 
-
-# =========================================================
-# 【V2 核心】導入 Line SDK V2 類別
-# =========================================================
+from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-# 修正：V2 只導入 TextMessage (V2 中沒有 TextMessageContent)
-from linebot.exceptions import InvalidSignatureError, LineBotApiError 
-from linebot.models import MessageEvent, TextMessage 
+from linebot.exceptions import InvalidSignatureError, LineBotApiError
+from linebot.models import MessageEvent, TextMessage, TextSendMessage, SourceGroup, SourceRoom, SourceUser
+import psycopg2
 
-# --- Line Bot Setup ---
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET")
+# --- 環境變數設定 ---
+# 確保這些變數存在於 Railway 環境變數中
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
+LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
+DATABASE_URL = os.environ.get('DATABASE_URL')
 
-# V2: 建立客戶端和 Handler
-line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler = WebhookHandler(LINE_CHANNEL_SECRET) 
+# --- 診斷程式碼 (用於檢查環境變數是否讀取成功) ---
+# 如果程式碼在初始化時崩潰，這些 print 語句會幫助我們診斷問題
+try:
+    if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET or not DATABASE_URL:
+        print("ERROR: Missing required environment variables!", file=sys.stderr)
+    else:
+        print(f"LINE_SECRET length: {len(LINE_CHANNEL_SECRET)}", file=sys.stderr)
+        print(f"LINE_TOKEN length: {len(LINE_CHANNEL_ACCESS_TOKEN)}", file=sys.stderr)
+        print(f"DB_URL length: {len(DATABASE_URL)}", file=sys.stderr)
+except Exception as e:
+    print(f"FATAL INIT ERROR during variable check: {e}", file=sys.stderr)
+# --- 診斷程式碼結束 ---
 
-# Flask 應用初始化
+# 檢查變數，如果缺少則讓程式崩潰以顯示明確錯誤
+if not LINE_CHANNEL_ACCESS_TOKEN:
+    sys.exit("LINE_CHANNEL_ACCESS_TOKEN is missing!")
+if not LINE_CHANNEL_SECRET:
+    sys.exit("LINE_CHANNEL_SECRET is missing!")
+
 app = Flask(__name__)
 
-# --- 資料庫連線函式 (保持不變) ---
+# 初始化 LINE Bot API 和 Handler
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# --- 資料庫連線函式 ---
 def get_db_connection():
-    """使用環境變數連線到 PostgreSQL (優先使用 DATABASE_URL)"""
-    conn_url = os.environ.get("DATABASE_URL")
-    if conn_url:
-        try:
-            return psycopg2.connect(conn_url)
-        except Exception as e:
-            print(f"Database connection via DATABASE_URL failed: {e}")
-            return None
-    
     try:
-        conn = psycopg2.connect(
-            host=os.environ.get('PGHOST'), 
-            database=os.environ.get('PGDATABASE'),
-            user=os.environ.get('PGUSER'),
-            password=os.environ.get('PGPASSWORD'),
-            port=os.environ.get('PGPORT')
-        )
+        conn = psycopg2.connect(DATABASE_URL)
         return conn
     except Exception as e:
-        print(f"Database connection failed: {e}")
+        # 在連線失敗時打印錯誤到日誌中
+        print(f"DATABASE CONNECTION ERROR: {e}", file=sys.stderr)
+        # 讓應用程序在啟動時保持活動，但資料庫操作會失敗
         return None
 
-# --- 資料庫操作：新增人名 ---
-def add_reporter(source_id, name):
+# --- 資料庫操作：新增回報人 ---
+def add_reporter(group_id, reporter_name):
     conn = get_db_connection()
-    if not conn:
-        return False, "❌ 資料庫儲存失敗，請聯繫管理員檢查 DB 連線。"
+    if conn is None:
+        return "Database connection failed."
 
     try:
-        cur = conn.cursor()
-        sql = "INSERT INTO group_reporters (group_id, reporter_name) VALUES (%s, %s)"
-        cur.execute(sql, (source_id, name))
-        conn.commit()
-        cur.close()
-        return True, f"✅ 已成功新增：**{name}** 為回報人！"
-    except psycopg2.errors.UniqueViolation:
-        conn.rollback()
-        return False, f"⚠️ **{name}** 已經是本群組的回報人了！"
-    except Exception as e:
-        conn.rollback()
-        print(f"Error adding reporter: {e}")
-        return False, "❌ 資料庫儲存失敗，請聯繫管理員檢查 DB 連線。"
-    finally:
-        if conn: conn.close()
+        with conn.cursor() as cur:
+            # 檢查是否已存在
+            cur.execute("SELECT group_id FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
+            if cur.fetchone():
+                return f"⚠️ **{reporter_name}** 已經是回報人！"
 
-# --- 資料庫操作：刪除人名 ---
-def delete_reporter(source_id, name):
-    conn = get_db_connection()
-    if not conn:
-        return False, "❌ 資料庫連線失敗，無法執行刪除。"
-
-    try:
-        cur = conn.cursor()
-        sql = "DELETE FROM group_reporters WHERE group_id = %s AND reporter_name = %s"
-        cur.execute(sql, (source_id, name))
-        
-        if cur.rowcount > 0:
+            # 插入新回報人
+            cur.execute("INSERT INTO group_reporters (group_id, reporter_name) VALUES (%s, %s);", (group_id, reporter_name))
             conn.commit()
-            cur.close()
-            return True, f"🗑️ 已成功刪除：**{name}**。"
-        else:
-            conn.rollback()
-            cur.close()
-            return False, f"⚠️ 查無此人：**{name}** 不在本群組的回報人名單中。"
-            
+            return f"✅ 已成功新增：**{reporter_name}** 為回報人！"
     except Exception as e:
         conn.rollback()
-        print(f"Error deleting reporter: {e}")
-        return False, "❌ 資料庫操作失敗，請聯繫管理員。"
+        print(f"DB ERROR (add_reporter): {e}", file=sys.stderr)
+        return f"🚨 資料庫操作失敗: {e}"
     finally:
-        if conn: conn.close()
+        conn.close()
 
 # --- 資料庫操作：儲存回報 ---
-def save_report(report_date, name, source_id):
+def save_report(group_id, report_date_str, reporter_name):
     conn = get_db_connection()
-    if not conn:
-        return False
+    if conn is None:
+        return "Database connection failed."
 
     try:
-        cur = conn.cursor()
-        sql = "INSERT INTO reports (report_date, name, source_id) VALUES (%s, %s, %s)"
-        cur.execute(sql, (report_date, name, source_id))
-        conn.commit()
-        cur.close()
-        return True
+        # 轉換日期格式為 PostgreSQL 接受的格式
+        report_date = datetime.strptime(report_date_str, '%Y.%m.%d').date()
+    except ValueError:
+        return "⚠️ 日期格式錯誤，請使用 **YYYY.MM.DD** 格式！"
+
+    try:
+        with conn.cursor() as cur:
+            # 檢查回報人是否在名單中
+            cur.execute("SELECT group_id FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
+            if not cur.fetchone():
+                return f"❌ **{reporter_name}** 不在回報人名單中，請先使用 **新增人名 {reporter_name}** 加入！"
+
+            # 檢查當天是否已回報過
+            cur.execute("SELECT * FROM reports WHERE group_id = %s AND report_date = %s AND name = %s;", (group_id, report_date, reporter_name))
+            if cur.fetchone():
+                return f"⚠️ **{reporter_name}** 已經回報過 {report_date_str} 的記錄了！"
+
+            # 儲存回報
+            cur.execute("INSERT INTO reports (group_id, report_date, name) VALUES (%s, %s, %s);", (group_id, report_date, reporter_name))
+            conn.commit()
+            return f"🎉 **{reporter_name}** 成功回報 {report_date_str}！"
     except Exception as e:
         conn.rollback()
-        print(f"Error saving report: {e}")
-        return False
+        print(f"DB ERROR (save_report): {e}", file=sys.stderr)
+        return f"🚨 資料庫操作失敗: {e}"
     finally:
-        if conn: conn.close()
+        conn.close()
 
-# -----------------------------------------------------------
-# Flask Webhook 路由 (使用 V2 WebhookHandler 處理請求)
-
+# --- Webhook 路由 ---
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers.get('X-Line-Signature', '')
+    signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
-    
+    app.logger.info("Request body: " + body)
+
     try:
-        # V2: 使用 handler.handle 呼叫被裝飾的函式
         handler.handle(body, signature)
     except InvalidSignatureError:
-        print("Invalid signature. Check your channel secret.")
+        print("Invalid signature. Check your channel secret/token.", file=sys.stderr)
         abort(400)
-    except Exception as e:
-        print(f"Webhook handling error: {e}")
-        return 'OK' 
-
+    except LineBotApiError as e:
+        print(f"LINE API Error: {e}", file=sys.stderr)
+        abort(500)
+    
     return 'OK'
 
-# -----------------------------------------------------------
-# Line 訊息處理邏輯 (使用 WebhookHandler Decorator)
-
-@handler.add(MessageEvent, message=TextMessage) # <-- V2 修正
-def handle_text_message(event):
-    """處理接收到的 Line 文本訊息事件 (由 WebhookHandler 自動觸發)"""
-    
+# --- 訊息處理：接收訊息事件 ---
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
     text = event.message.text.strip()
-    # 統一獲取來源 ID (群組或用戶) - V2 獲取方式
-    source_id = event.source.group_id if hasattr(event.source, 'group_id') else \
-                (event.source.room_id if hasattr(event.source, 'room_id') else event.source.user_id) 
-
-    reply_message = None
-
-    # 1. 處理「新增人名」指令
-    match_add = re.match(r'^\s*新增人名\s+([^\n\r]+)', text)
-    if match_add:
-        name_to_add = match_add.group(1).strip()
-        success, message = add_reporter(source_id, name_to_add)
-        reply_message = TextMessage(text=message)
-        
-    # 2. 處理「刪除人名」指令
-    elif match_delete := re.match(r'^\s*刪除人名\s+([^\n\r]+)', text):
-        name_to_delete = match_delete.group(1).strip()
-        success, message = delete_reporter(source_id, name_to_delete)
-        reply_message = TextMessage(text=message)
     
-    # 3. 處理「回報」指令
-    elif match_report := re.match(r'^\s*(\d{4}[./]\d{1,2}[./]\d{1,2})\s*（[^）]+）?\s*([^\n\r]+)', text):
-        date_str = match_report.group(1).replace('/', '.')
-        name = match_report.group(2).strip()
-        
-        try:
-            report_date = datetime.strptime(date_str, '%Y.%m.%d').date()
-        except ValueError:
-            reply_message = TextMessage(text="❌ 日期格式錯誤。請使用 YYYY.MM.DD 格式。")
-        else:
-            if save_report(report_date, name, source_id):
-                reply_message = TextMessage(text=f"✅ 紀錄成功！\n回報者: **{name}**\n日期: **{report_date.strftime('%Y/%m/%d')}**\n\n感謝您的回報！")
-            else:
-                reply_message = TextMessage(text="❌ 資料庫儲存失敗，請聯繫管理員檢查 DB 連線。")
-        
-    # 4. 如果有需要回覆的訊息，嘗試回覆
-    if reply_message:
-        try:
-            # V2 API Call: line_bot_api.reply_message
-            line_bot_api.reply_message(
-                event.reply_token,
-                reply_message
-            )
-        # 捕捉 V2 API 錯誤，並打印詳細資訊到日誌
-        except LineBotApiError as e: 
-            print(f"============================================================")
-            print(f"🚨 LINE API 回覆失敗！請檢查 Channel Access Token 和 Secret！")
-            print(f"LINE API Error: {e.status_code} - {e.error.message}")
-            print(f"============================================================")
-        except Exception as e:
-            print(f"🚨 意外錯誤：回覆訊息時發生例外：{e}")
-    
-    # 5. 處理「雜訊」（非指令訊息）
-    return 
+    # 僅處理群組/聊天室訊息，如果需要個人聊天也處理，請修改此處邏輯
+    if isinstance(event.source, SourceGroup) or isinstance(event.source, SourceRoom):
+        # 獲取群組 ID (V2 語法)
+        group_id = event.source.group_id if isinstance(event.source, SourceGroup) else event.source.room_id
 
+        reply_text = None
+
+        # 1. 處理「新增人名 [人名]」指令
+        match_add = re.match(r"^新增人名\s+(.+)$", text)
+        if match_add:
+            reporter_name = match_add.group(1).strip()
+            reply_text = add_reporter(group_id, reporter_name)
+
+        # 2. 處理「YYYY.MM.DD 人名」回報指令
+        # 匹配日期格式 YYYY.MM.DD 後跟著人名
+        match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s+(.+)$", text)
+        if match_report:
+            date_str = match_report.group(1)
+            reporter_name = match_report.group(2).strip()
+            reply_text = save_report(group_id, date_str, reporter_name)
+
+        # 3. 處理「查詢名單」指令 (可選)
+        if text == "查詢名單":
+            # 這裡可以加入查詢所有回報人的邏輯，但為了穩定性，暫時省略，
+            # 避免因 DB 連線問題導致應用程式崩潰。
+            pass
+
+        # 回覆訊息
+        if reply_text:
+            try:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+            except Exception as e:
+                print(f"LINE REPLY ERROR: {e}", file=sys.stderr)
+
+
+# --- 啟動 Flask 應用程式 ---
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True, host='0.0.0.0', port=os.getenv('PORT', 8080))
