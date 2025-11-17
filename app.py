@@ -9,6 +9,7 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage, SourceGro
 import psycopg2
 
 # --- 環境變數設定 ---
+# 確保這些變數存在於 Railway 環境變數中
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -67,7 +68,7 @@ def add_reporter(group_id, reporter_name):
     finally:
         conn.close()
 
-# --- 資料庫操作：刪除回報人 (新增此處) ---
+# --- 資料庫操作：刪除回報人 (新增此處功能) ---
 def delete_reporter(group_id, reporter_name):
     conn = get_db_connection()
     if conn is None:
@@ -83,8 +84,7 @@ def delete_reporter(group_id, reporter_name):
             # 刪除回報人
             cur.execute("DELETE FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
             
-            # (可選) 順便刪除該回報人的歷史記錄，以保持 reports 表的整潔
-            # 注意：reports 表欄位使用 source_id
+            # 順便刪除該回報人的歷史記錄 (reports 表欄位使用 source_id)
             cur.execute("DELETE FROM reports WHERE source_id = %s AND name = %s;", (group_id, reporter_name))
 
             conn.commit()
@@ -148,30 +148,33 @@ def callback():
     
     return 'OK'
 
-# --- 訊息處理：接收訊息事件 ---
+# --- 訊息處理：接收訊息事件 (修復多行輸入和空格問題) ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    text = event.message.text.strip()
-    
+    # 關鍵修正: 只使用訊息的第一行來匹配指令
+    full_text = event.message.text
+    first_line = full_text.split('\n')[0].strip()
+    text_to_match = first_line # 所有指令匹配現在都針對第一行
+
     if isinstance(event.source, SourceGroup) or isinstance(event.source, SourceRoom):
         group_id = event.source.group_id if isinstance(event.source, SourceGroup) else event.source.room_id
 
         reply_text = None
 
-        # 1. 處理「新增人名 [人名]」指令
-        match_add = re.match(r"^新增人名\s+(.+)$", text)
+        # 1. 處理「新增人名 [人名]」指令 (修復全形/多個空格)
+        match_add = re.match(r"^新增人名[\s　]+(.+)$", text_to_match)
         if match_add:
             reporter_name = match_add.group(1).strip()
             reply_text = add_reporter(group_id, reporter_name)
 
-        # 1.5 處理「刪除人名 [人名]」指令 (補齊此處功能)
-        match_delete = re.match(r"^刪除人名\s+(.+)$", text)
+        # 1.5 處理「刪除人名 [人名]」指令 (修復全形/多個空格)
+        match_delete = re.match(r"^刪除人名[\s　]+(.+)$", text_to_match)
         if match_delete:
             reporter_name = match_delete.group(1).strip()
             reply_text = delete_reporter(group_id, reporter_name)
 
-        # 2. 處理「YYYY.MM.DD [其他字元] 人名」回報指令 (修正 Regex)
-        match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s*.*?(\w+)$", text)
+        # 2. 處理「YYYY.MM.DD [其他字元] 人名」回報指令
+        match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s*.*?(\w+)$", text_to_match)
         if match_report:
             date_str = match_report.group(1)
             reporter_name = match_report.group(2).strip()
@@ -221,7 +224,7 @@ def send_daily_reminder(line_bot_api):
             
             with conn.cursor() as cur:
                 for reporter_name in reporters:
-                    # 修正 3: 檢查該回報人在該日期是否有報告記錄 (使用 reports 表，欄位改為 source_id)
+                    # 檢查該回報人在該日期是否有報告記錄 (使用 reports 表，欄位改為 source_id)
                     cur.execute("SELECT name FROM reports WHERE source_id = %s AND report_date = %s AND name = %s;", 
                                 (group_id, check_date, reporter_name))
                     
