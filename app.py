@@ -9,7 +9,6 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage, SourceGro
 import psycopg2
 
 # --- 環境變數設定 ---
-# 確保這些變數存在於 Railway 環境變數中
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -26,7 +25,6 @@ except Exception as e:
     print(f"FATAL INIT ERROR during variable check: {e}", file=sys.stderr)
 # --- 診斷程式碼結束 ---
 
-# 檢查變數，如果缺少則讓程式崩潰以顯示明確錯誤
 if not LINE_CHANNEL_ACCESS_TOKEN:
     sys.exit("LINE_CHANNEL_ACCESS_TOKEN is missing!")
 if not LINE_CHANNEL_SECRET:
@@ -34,18 +32,16 @@ if not LINE_CHANNEL_SECRET:
 
 app = Flask(__name__)
 
-# 初始化 LINE Bot API 和 Handler
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # --- 資料庫連線函式 ---
 def get_db_connection():
     try:
-        # 修正：強制使用 SSL mode='require'，以確保與 Railway 資料庫的連線穩定
+        # 修正：強制使用 SSL mode='require'，確保連線穩定
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         return conn
     except Exception as e:
-        # 在連線失敗時打印錯誤到日誌中
         print(f"DATABASE CONNECTION ERROR: {e}", file=sys.stderr)
         return None
 
@@ -57,18 +53,45 @@ def add_reporter(group_id, reporter_name):
 
     try:
         with conn.cursor() as cur:
-            # 檢查是否已存在
             cur.execute("SELECT group_id FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
             if cur.fetchone():
                 return f"⚠️ **{reporter_name}** 已經是回報人！"
 
-            # 插入新回報人
             cur.execute("INSERT INTO group_reporters (group_id, reporter_name) VALUES (%s, %s);", (group_id, reporter_name))
             conn.commit()
             return f"✅ 已成功新增：**{reporter_name}** 為回報人！"
     except Exception as e:
         conn.rollback()
         print(f"DB ERROR (add_reporter): {e}", file=sys.stderr)
+        return f"🚨 資料庫操作失敗: {e}"
+    finally:
+        conn.close()
+
+# --- 資料庫操作：刪除回報人 (新增此處) ---
+def delete_reporter(group_id, reporter_name):
+    conn = get_db_connection()
+    if conn is None:
+        return "Database connection failed."
+
+    try:
+        with conn.cursor() as cur:
+            # 檢查是否存在
+            cur.execute("SELECT group_id FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
+            if not cur.fetchone():
+                return f"⚠️ **{reporter_name}** 不在回報人名單中，無法刪除！"
+
+            # 刪除回報人
+            cur.execute("DELETE FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
+            
+            # (可選) 順便刪除該回報人的歷史記錄，以保持 reports 表的整潔
+            # 注意：reports 表欄位使用 source_id
+            cur.execute("DELETE FROM reports WHERE source_id = %s AND name = %s;", (group_id, reporter_name))
+
+            conn.commit()
+            return f"🗑️ 已成功刪除：**{reporter_name}**，並清除了所有歷史回報記錄。"
+    except Exception as e:
+        conn.rollback()
+        print(f"DB ERROR (delete_reporter): {e}", file=sys.stderr)
         return f"🚨 資料庫操作失敗: {e}"
     finally:
         conn.close()
@@ -80,7 +103,6 @@ def save_report(group_id, report_date_str, reporter_name):
         return "Database connection failed."
 
     try:
-        # 轉換日期格式為 PostgreSQL 接受的格式
         report_date = datetime.strptime(report_date_str, '%Y.%m.%d').date()
     except ValueError:
         return "⚠️ 日期格式錯誤，請使用 **YYYY.MM.DD** 格式！"
@@ -142,8 +164,13 @@ def handle_message(event):
             reporter_name = match_add.group(1).strip()
             reply_text = add_reporter(group_id, reporter_name)
 
-        # 2. 處理「YYYY.MM.DD 人名」回報指令
-        # 修正 Regex: 允許日期後到人名之間有任意字符 (例如 (日), (Mon) 等)
+        # 1.5 處理「刪除人名 [人名]」指令 (補齊此處功能)
+        match_delete = re.match(r"^刪除人名\s+(.+)$", text)
+        if match_delete:
+            reporter_name = match_delete.group(1).strip()
+            reply_text = delete_reporter(group_id, reporter_name)
+
+        # 2. 處理「YYYY.MM.DD [其他字元] 人名」回報指令 (修正 Regex)
         match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s*.*?(\w+)$", text)
         if match_report:
             date_str = match_report.group(1)
@@ -211,7 +238,6 @@ def send_daily_reminder(line_bot_api):
                     line_bot_api.push_message(group_id, TextSendMessage(text=message_text))
                     print(f"Sent reminder to group {group_id} for {len(missing_reports)} missing reports.", file=sys.stderr)
                 except LineBotApiError as e:
-                    # 如果 Bot 不在群組中，會引發錯誤
                     print(f"LINE API PUSH ERROR to {group_id}: {e}", file=sys.stderr)
                     
     except Exception as e:
@@ -226,7 +252,6 @@ def send_daily_reminder(line_bot_api):
 # --- 新增的排程觸發路由 ---
 @app.route("/run_scheduler")
 def run_scheduler_endpoint():
-    # 調用核心排程邏輯
     result = send_daily_reminder(line_bot_api)
     return result
 
