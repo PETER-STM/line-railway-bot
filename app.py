@@ -42,13 +42,13 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # --- 資料庫連線函式 ---
 def get_db_connection():
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        # 強制使用 SSL mode='require'，以確保與 Railway 資料庫的連線穩定
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         return conn
     except Exception as e:
         # 在連線失敗時打印錯誤到日誌中
         print(f"DATABASE CONNECTION ERROR: {e}", file=sys.stderr)
         return None
-
 # --- 資料庫操作：新增回報人 ---
 def add_reporter(group_id, reporter_name):
     conn = get_db_connection()
