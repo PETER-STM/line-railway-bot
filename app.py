@@ -46,7 +46,7 @@ def get_db_connection():
         print(f"DATABASE CONNECTION ERROR: {e}", file=sys.stderr)
         return None
 
-# --- 資料庫操作：新增回報人 (group_reporters 表使用 group_id) ---
+# --- 資料庫操作：新增回報人 ---
 def add_reporter(group_id, reporter_name):
     conn = get_db_connection()
     if conn is None:
@@ -68,7 +68,7 @@ def add_reporter(group_id, reporter_name):
     finally:
         conn.close()
 
-# --- 資料庫操作：刪除回報人 (新增此處功能) ---
+# --- 資料庫操作：刪除回報人 ---
 def delete_reporter(group_id, reporter_name):
     conn = get_db_connection()
     if conn is None:
@@ -96,6 +96,34 @@ def delete_reporter(group_id, reporter_name):
     finally:
         conn.close()
 
+# --- 資料庫操作：獲取回報人名單 (新增此處功能) ---
+def get_reporter_list(group_id):
+    conn = get_db_connection()
+    if conn is None:
+        return "Database connection failed."
+
+    try:
+        with conn.cursor() as cur:
+            # 查詢該群組/房間的所有回報人
+            cur.execute("SELECT reporter_name FROM group_reporters WHERE group_id = %s ORDER BY reporter_name;", (group_id,))
+            reporters = [row[0] for row in cur.fetchall()]
+            
+            if not reporters:
+                return "👥 目前名單中沒有任何回報人。請使用 **新增人名 [人名]** 來加入。"
+            
+            # 格式化輸出
+            list_text = "📋 **當前回報人名單：**\n\n"
+            list_text += "\n".join([f"🔸 {name}" for name in reporters])
+            list_text += "\n\n(使用 **新增人名 [人名]** 或 **刪除人名 [人名]** 進行管理)"
+            
+            return list_text
+    except Exception as e:
+        conn.rollback()
+        print(f"DB ERROR (get_reporter_list): {e}", file=sys.stderr)
+        return f"🚨 資料庫操作失敗: {e}"
+    finally:
+        conn.close()
+
 # --- 資料庫操作：儲存回報 (修正 reports 表欄位為 source_id) ---
 def save_report(group_id, report_date_str, reporter_name):
     conn = get_db_connection()
@@ -109,17 +137,17 @@ def save_report(group_id, report_date_str, reporter_name):
 
     try:
         with conn.cursor() as cur:
-            # 檢查回報人是否在名單中 (使用 group_reporters 表，欄位為 group_id)
+            # 檢查回報人是否在名單中
             cur.execute("SELECT group_id FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
             if not cur.fetchone():
                 return f"❌ **{reporter_name}** 不在回報人名單中，請先使用 **新增人名 {reporter_name}** 加入！"
 
-            # 修正 1: 檢查當天是否已回報過 (使用 reports 表，欄位改為 source_id)
+            # 檢查當天是否已回報過
             cur.execute("SELECT * FROM reports WHERE source_id = %s AND report_date = %s AND name = %s;", (group_id, report_date, reporter_name))
             if cur.fetchone():
                 return f"⚠️ **{reporter_name}** 已經回報過 {report_date_str} 的記錄了！"
 
-            # 修正 2: 儲存回報 (使用 reports 表，欄位改為 source_id)
+            # 儲存回報
             cur.execute("INSERT INTO reports (source_id, report_date, name) VALUES (%s, %s, %s);", (group_id, report_date, reporter_name))
             conn.commit()
             return f"🎉 **{reporter_name}** 成功回報 {report_date_str}！"
@@ -154,7 +182,7 @@ def handle_message(event):
     # 關鍵修正: 只使用訊息的第一行來匹配指令
     full_text = event.message.text
     first_line = full_text.split('\n')[0].strip()
-    text_to_match = first_line # 所有指令匹配現在都針對第一行
+    text_to_match = first_line
 
     if isinstance(event.source, SourceGroup) or isinstance(event.source, SourceRoom):
         group_id = event.source.group_id if isinstance(event.source, SourceGroup) else event.source.room_id
@@ -172,6 +200,10 @@ def handle_message(event):
         if match_delete:
             reporter_name = match_delete.group(1).strip()
             reply_text = delete_reporter(group_id, reporter_name)
+
+        # 1.6 處理「查詢名單 / 查看人員」指令 (新增此處功能)
+        if text_to_match in ["查詢名單", "查看人員", "名單", "list"]:
+            reply_text = get_reporter_list(group_id)
 
         # 2. 處理「YYYY.MM.DD [其他字元] 人名」回報指令
         match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s*.*?(\w+)$", text_to_match)
