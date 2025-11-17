@@ -1,7 +1,7 @@
 import os
 import sys
 import re
-from datetime import datetime, timedelta  # 確保導入 timedelta
+from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
@@ -9,7 +9,6 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage, SourceGro
 import psycopg2
 
 # --- 環境變數設定 ---
-# 確保這些變數存在於 Railway 環境變數中
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 DATABASE_URL = os.environ.get('DATABASE_URL')
@@ -19,7 +18,6 @@ try:
     if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET or not DATABASE_URL:
         print("ERROR: Missing required environment variables!", file=sys.stderr)
     else:
-        # 打印這些變數的長度 (確認它們不為空)
         print(f"LINE_SECRET length: {len(LINE_CHANNEL_SECRET)}", file=sys.stderr)
         print(f"LINE_TOKEN length: {len(LINE_CHANNEL_ACCESS_TOKEN)}", file=sys.stderr)
         print(f"DB_URL length: {len(DATABASE_URL)}", file=sys.stderr)
@@ -27,7 +25,6 @@ except Exception as e:
     print(f"FATAL INIT ERROR during variable check: {e}", file=sys.stderr)
 # --- 診斷程式碼結束 ---
 
-# 檢查變數，如果缺少則讓程式崩潰以顯示明確錯誤
 if not LINE_CHANNEL_ACCESS_TOKEN:
     sys.exit("LINE_CHANNEL_ACCESS_TOKEN is missing!")
 if not LINE_CHANNEL_SECRET:
@@ -35,21 +32,20 @@ if not LINE_CHANNEL_SECRET:
 
 app = Flask(__name__)
 
-# 初始化 LINE Bot API 和 Handler
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # --- 資料庫連線函式 ---
 def get_db_connection():
     try:
-        # 強制使用 SSL mode='require'，以確保與 Railway 資料庫的連線穩定
+        # 強制使用 SSL mode='require'
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         return conn
     except Exception as e:
-        # 在連線失敗時打印錯誤到日誌中
         print(f"DATABASE CONNECTION ERROR: {e}", file=sys.stderr)
         return None
-# --- 資料庫操作：新增回報人 ---
+
+# --- 資料庫操作：新增回報人 (group_reporters 表使用 group_id，無需修改) ---
 def add_reporter(group_id, reporter_name):
     conn = get_db_connection()
     if conn is None:
@@ -57,12 +53,10 @@ def add_reporter(group_id, reporter_name):
 
     try:
         with conn.cursor() as cur:
-            # 檢查是否已存在
             cur.execute("SELECT group_id FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
             if cur.fetchone():
                 return f"⚠️ **{reporter_name}** 已經是回報人！"
 
-            # 插入新回報人
             cur.execute("INSERT INTO group_reporters (group_id, reporter_name) VALUES (%s, %s);", (group_id, reporter_name))
             conn.commit()
             return f"✅ 已成功新增：**{reporter_name}** 為回報人！"
@@ -73,14 +67,13 @@ def add_reporter(group_id, reporter_name):
     finally:
         conn.close()
 
-# --- 資料庫操作：儲存回報 ---
+# --- 資料庫操作：儲存回報 (reports 表使用 source_id，需要修改) ---
 def save_report(group_id, report_date_str, reporter_name):
     conn = get_db_connection()
     if conn is None:
         return "Database connection failed."
 
     try:
-        # 轉換日期格式為 PostgreSQL 接受的格式
         report_date = datetime.strptime(report_date_str, '%Y.%m.%d').date()
     except ValueError:
         return "⚠️ 日期格式錯誤，請使用 **YYYY.MM.DD** 格式！"
@@ -92,13 +85,13 @@ def save_report(group_id, report_date_str, reporter_name):
             if not cur.fetchone():
                 return f"❌ **{reporter_name}** 不在回報人名單中，請先使用 **新增人名 {reporter_name}** 加入！"
 
-            # 檢查當天是否已回報過
-            cur.execute("SELECT * FROM reports WHERE group_id = %s AND report_date = %s AND name = %s;", (group_id, report_date, reporter_name))
+            # 修正 1: 檢查當天是否已回報過 (使用 source_id)
+            cur.execute("SELECT * FROM reports WHERE source_id = %s AND report_date = %s AND name = %s;", (group_id, report_date, reporter_name))
             if cur.fetchone():
                 return f"⚠️ **{reporter_name}** 已經回報過 {report_date_str} 的記錄了！"
 
-            # 儲存回報
-            cur.execute("INSERT INTO reports (group_id, report_date, name) VALUES (%s, %s, %s);", (group_id, report_date, reporter_name))
+            # 修正 2: 儲存回報 (使用 source_id)
+            cur.execute("INSERT INTO reports (source_id, report_date, name) VALUES (%s, %s, %s);", (group_id, report_date, reporter_name))
             conn.commit()
             return f"🎉 **{reporter_name}** 成功回報 {report_date_str}！"
     except Exception as e:
@@ -157,7 +150,7 @@ def handle_message(event):
                 print(f"LINE REPLY ERROR: {e}", file=sys.stderr)
 
 
-# --- START SCHEDULER LOGIC (移動到 app.py 中) ---
+# --- START SCHEDULER LOGIC ---
 
 # 輔助函數：獲取所有回報人名單
 def get_all_reporters(conn):
@@ -193,8 +186,8 @@ def send_daily_reminder(line_bot_api):
             
             with conn.cursor() as cur:
                 for reporter_name in reporters:
-                    # 檢查該回報人在該日期是否有報告記錄
-                    cur.execute("SELECT name FROM reports WHERE group_id = %s AND report_date = %s AND name = %s;", 
+                    # 修正 3: 檢查該回報人在該日期是否有報告記錄 (使用 source_id)
+                    cur.execute("SELECT name FROM reports WHERE source_id = %s AND report_date = %s AND name = %s;", 
                                 (group_id, check_date, reporter_name))
                     
                     if not cur.fetchone():
@@ -210,11 +203,12 @@ def send_daily_reminder(line_bot_api):
                     line_bot_api.push_message(group_id, TextSendMessage(text=message_text))
                     print(f"Sent reminder to group {group_id} for {len(missing_reports)} missing reports.", file=sys.stderr)
                 except LineBotApiError as e:
-                    # 如果 Bot 不在群組中，會引發錯誤
                     print(f"LINE API PUSH ERROR to {group_id}: {e}", file=sys.stderr)
                     
     except Exception as e:
+        # 捕捉並打印錯誤訊息
         print(f"SCHEDULER DB ERROR: {e}", file=sys.stderr)
+        # 返回錯誤訊息給瀏覽器
         return f"Error during schedule processing: {e}"
     finally:
         conn.close()
@@ -225,7 +219,6 @@ def send_daily_reminder(line_bot_api):
 # --- 新增的排程觸發路由 ---
 @app.route("/run_scheduler")
 def run_scheduler_endpoint():
-    # 調用核心排程邏輯
     result = send_daily_reminder(line_bot_api)
     return result
 
