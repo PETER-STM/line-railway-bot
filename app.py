@@ -1,7 +1,7 @@
 import os
 import sys
 import re
-from datetime import datetime
+from datetime import datetime, timedelta  # 確保導入 timedelta
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError, LineBotApiError
@@ -14,12 +14,12 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
-# --- 診斷程式碼 (用於檢查環境變數是否讀取成功) ---
-# 如果程式碼在初始化時崩潰，這些 print 語句會幫助我們診斷問題
+# --- 診斷程式碼 ---
 try:
     if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET or not DATABASE_URL:
         print("ERROR: Missing required environment variables!", file=sys.stderr)
     else:
+        # 打印這些變數的長度 (確認它們不為空)
         print(f"LINE_SECRET length: {len(LINE_CHANNEL_SECRET)}", file=sys.stderr)
         print(f"LINE_TOKEN length: {len(LINE_CHANNEL_ACCESS_TOKEN)}", file=sys.stderr)
         print(f"DB_URL length: {len(DATABASE_URL)}", file=sys.stderr)
@@ -47,7 +47,6 @@ def get_db_connection():
     except Exception as e:
         # 在連線失敗時打印錯誤到日誌中
         print(f"DATABASE CONNECTION ERROR: {e}", file=sys.stderr)
-        # 讓應用程序在啟動時保持活動，但資料庫操作會失敗
         return None
 
 # --- 資料庫操作：新增回報人 ---
@@ -132,9 +131,7 @@ def callback():
 def handle_message(event):
     text = event.message.text.strip()
     
-    # 僅處理群組/聊天室訊息，如果需要個人聊天也處理，請修改此處邏輯
     if isinstance(event.source, SourceGroup) or isinstance(event.source, SourceRoom):
-        # 獲取群組 ID (V2 語法)
         group_id = event.source.group_id if isinstance(event.source, SourceGroup) else event.source.room_id
 
         reply_text = None
@@ -146,18 +143,11 @@ def handle_message(event):
             reply_text = add_reporter(group_id, reporter_name)
 
         # 2. 處理「YYYY.MM.DD 人名」回報指令
-        # 匹配日期格式 YYYY.MM.DD 後跟著人名
         match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s+(.+)$", text)
         if match_report:
             date_str = match_report.group(1)
             reporter_name = match_report.group(2).strip()
             reply_text = save_report(group_id, date_str, reporter_name)
-
-        # 3. 處理「查詢名單」指令 (可選)
-        if text == "查詢名單":
-            # 這裡可以加入查詢所有回報人的邏輯，但為了穩定性，暫時省略，
-            # 避免因 DB 連線問題導致應用程式崩潰。
-            pass
 
         # 回覆訊息
         if reply_text:
@@ -165,6 +155,81 @@ def handle_message(event):
                 line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
             except Exception as e:
                 print(f"LINE REPLY ERROR: {e}", file=sys.stderr)
+
+
+# --- START SCHEDULER LOGIC (移動到 app.py 中) ---
+
+# 輔助函數：獲取所有回報人名單
+def get_all_reporters(conn):
+    cur = conn.cursor()
+    cur.execute("SELECT group_id, reporter_name FROM group_reporters ORDER BY group_id;")
+    all_reporters = cur.fetchall()
+    return all_reporters
+
+# 核心邏輯：發送每日提醒
+def send_daily_reminder(line_bot_api):
+    conn = get_db_connection()
+    if conn is None:
+        return "Error: Database connection failed."
+
+    # 設定要檢查的日期 (昨天)
+    check_date = datetime.now().date() - timedelta(days=1)
+    check_date_str = check_date.strftime('%Y.%m.%d')
+    
+    print(f"Scheduler running for date: {check_date_str}", file=sys.stderr)
+
+    try:
+        all_reporters = get_all_reporters(conn)
+        
+        groups_to_check = {}
+        for group_id, reporter_name in all_reporters:
+            if group_id not in groups_to_check:
+                groups_to_check[group_id] = []
+            groups_to_check[group_id].append(reporter_name)
+
+        # 針對每個群組檢查未回報的人
+        for group_id, reporters in groups_to_check.items():
+            missing_reports = []
+            
+            with conn.cursor() as cur:
+                for reporter_name in reporters:
+                    # 檢查該回報人在該日期是否有報告記錄
+                    cur.execute("SELECT name FROM reports WHERE group_id = %s AND report_date = %s AND name = %s;", 
+                                (group_id, check_date, reporter_name))
+                    
+                    if not cur.fetchone():
+                        missing_reports.append(reporter_name)
+
+            # 如果有未回報的人，則發送提醒
+            if missing_reports:
+                message_text = f"🚨 **{check_date_str}** 回報提醒！以下成員尚未回報：\n\n"
+                message_text += "\n".join([f"👉 {name}" for name in missing_reports])
+                message_text += "\n\n請儘快回報！"
+                
+                try:
+                    line_bot_api.push_message(group_id, TextSendMessage(text=message_text))
+                    print(f"Sent reminder to group {group_id} for {len(missing_reports)} missing reports.", file=sys.stderr)
+                except LineBotApiError as e:
+                    # 如果 Bot 不在群組中，會引發錯誤
+                    print(f"LINE API PUSH ERROR to {group_id}: {e}", file=sys.stderr)
+                    
+    except Exception as e:
+        print(f"SCHEDULER DB ERROR: {e}", file=sys.stderr)
+        return f"Error during schedule processing: {e}"
+    finally:
+        conn.close()
+    
+    return "Scheduler execution finished successfully."
+
+
+# --- 新增的排程觸發路由 ---
+@app.route("/run_scheduler")
+def run_scheduler_endpoint():
+    # 調用核心排程邏輯
+    result = send_daily_reminder(line_bot_api)
+    return result
+
+# --- END SCHEDULER LOGIC ---
 
 
 # --- 啟動 Flask 應用程式 ---
