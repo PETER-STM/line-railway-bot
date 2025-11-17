@@ -114,7 +114,6 @@ def get_reporter_list(group_id):
             # 格式化輸出
             list_text = "⭐ **本團隊閃亮亮回報名單：**\n\n"
             list_text += "\n".join([f"🔸 {name}" for name in reporters])
-            # 管理提示已移除
             
             return list_text
     except Exception as e:
@@ -145,7 +144,7 @@ def save_report(group_id, report_date_str, reporter_name):
             # 檢查當天是否已回報過
             cur.execute("SELECT * FROM reports WHERE source_id = %s AND report_date = %s AND name = %s;", (group_id, report_date, reporter_name))
             if cur.fetchone():
-                # 最終 UX 修正：使用中性確認語氣，避免給人「登記」的僥倖心態
+                # UX 修正：使用中性確認語氣，避免給人「登記」的僥倖心態
                 return f"👍 效率超高！**{reporter_name}** {report_date_str} 的回報狀態早已是 **已完成** 囉！不用再操作啦，您休息一下吧！☕"
 
             # 儲存回報
@@ -159,7 +158,7 @@ def save_report(group_id, report_date_str, reporter_name):
     finally:
         conn.close()
 
-# --- Webhook 路由 (不變) ---
+# --- Webhook 路由 ---
 @app.route("/callback", methods=['POST'])
 def callback():
     signature = request.headers['X-Line-Signature']
@@ -177,7 +176,7 @@ def callback():
     
     return 'OK'
 
-# --- 訊息處理：接收訊息事件 (不變) ---
+# --- 訊息處理：接收訊息事件 (最終 Regex 修正：隔離星期幾) ---
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     # 關鍵修正: 只使用訊息的第一行來匹配指令
@@ -194,27 +193,30 @@ def handle_message(event):
         match_add = re.match(r"^新增人名[\s　]+(.+)$", text_to_match)
         if match_add:
             reporter_name = match_add.group(1).strip()
-            # 調用已優化的 add_reporter
             reply_text = add_reporter(group_id, reporter_name)
 
         # 1.5 處理「刪除人名 [人名]」指令 (修復全形/多個空格)
         match_delete = re.match(r"^刪除人名[\s　]+(.+)$", text_to_match)
         if match_delete:
             reporter_name = match_delete.group(1).strip()
-            # 調用已優化的 delete_reporter
             reply_text = delete_reporter(group_id, reporter_name)
 
         # 1.6 處理「查詢名單 / 查看人員」指令
         if text_to_match in ["查詢名單", "查看人員", "名單", "list"]:
-            # 調用已優化的 get_reporter_list
             reply_text = get_reporter_list(group_id)
 
-        # 2. 處理「YYYY.MM.DD [其他字元] 人名」回報指令
-        match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s*.*?(\w+)$", text_to_match)
+        # 2. 處理「YYYY.MM.DD [星期幾] [人名]」回報指令
+        # 最終修正 Regex:
+        # Group 1: (\d{4}\.\d{2}\.\d{2}) -> 日期
+        # (?:...)?: 匹配並拋棄選用的 (一) 到 (日) 標記
+        # Group 2: (.+) -> 擷取剩下的所有內容作為純粹的人名
+        regex_pattern = r"^(\d{4}\.\d{2}\.\d{2})\s*(?:[\s　]*[（(][\s\w\u4e00-\u9fff]+[)）])?\s*(.+)$"
+        match_report = re.match(regex_pattern, text_to_match)
+
         if match_report:
             date_str = match_report.group(1)
-            reporter_name = match_report.group(2).strip()
-            # 調用已優化的 save_report
+            # Group 2 現在只包含名字 (例如 '海豚🐬')
+            reporter_name = match_report.group(2).strip() 
             reply_text = save_report(group_id, date_str, reporter_name)
 
         # 回覆訊息
@@ -227,14 +229,14 @@ def handle_message(event):
 
 # --- START SCHEDULER LOGIC ---
 
-# 輔助函數：獲取所有回報人名單 (不變)
+# 輔助函數：獲取所有回報人名單
 def get_all_reporters(conn):
     cur = conn.cursor()
     cur.execute("SELECT group_id, reporter_name FROM group_reporters ORDER BY group_id;")
     all_reporters = cur.fetchall()
     return all_reporters
 
-# 核心邏輯：發送每日提醒 (情緒價值優化)
+# 核心邏輯：發送每日提醒 (包含情緒價值優化)
 def send_daily_reminder(line_bot_api):
     conn = get_db_connection()
     if conn is None:
@@ -291,7 +293,7 @@ def send_daily_reminder(line_bot_api):
     return "Scheduler execution finished successfully."
 
 
-# --- 新增的排程觸發路由 (不變) ---
+# --- 新增的排程觸發路由 ---
 @app.route("/run_scheduler")
 def run_scheduler_endpoint():
     result = send_daily_reminder(line_bot_api)
@@ -300,6 +302,6 @@ def run_scheduler_endpoint():
 # --- END SCHEDULER LOGIC ---
 
 
-# --- 啟動 Flask 應用程式 (不變) ---
+# --- 啟動 Flask 應用程式 ---
 if __name__ == "__main__":
     app.run(debug=True, host='0.0.0.0', port=os.getenv('PORT', 8080))
