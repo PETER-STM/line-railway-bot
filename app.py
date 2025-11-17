@@ -96,7 +96,7 @@ def delete_reporter(group_id, reporter_name):
     finally:
         conn.close()
 
-# --- 資料庫操作：獲取回報人名單 (新增此處功能) ---
+# --- 資料庫操作：獲取回報人名單 ---
 def get_reporter_list(group_id):
     conn = get_db_connection()
     if conn is None:
@@ -124,7 +124,7 @@ def get_reporter_list(group_id):
     finally:
         conn.close()
 
-# --- 資料庫操作：儲存回報 (修正 reports 表欄位為 source_id) ---
+# --- 資料庫操作：儲存回報 (包含最終語氣修正) ---
 def save_report(group_id, report_date_str, reporter_name):
     conn = get_db_connection()
     if conn is None:
@@ -141,11 +141,15 @@ def save_report(group_id, report_date_str, reporter_name):
             cur.execute("SELECT group_id FROM group_reporters WHERE group_id = %s AND reporter_name = %s;", (group_id, reporter_name))
             if not cur.fetchone():
                 return f"❌ **{reporter_name}** 不在回報人名單中，請先使用 **新增人名 {reporter_name}** 加入！"
-# 檢查當天是否已回報過
+
+            # 檢查當天是否已回報過
             cur.execute("SELECT * FROM reports WHERE source_id = %s AND report_date = %s AND name = %s;", (group_id, report_date, reporter_name))
             if cur.fetchone():
-                # 使用「狀態已完成」來代替「已回報過記錄」
-                return f"✅ **{reporter_name}** {report_date_str} 的回報狀態：**已完成**，請勿再次操作。"            cur.execute("INSERT INTO reports (source_id, report_date, name) VALUES (%s, %s, %s);", (group_id, report_date, reporter_name))
+                # 最終修正：避免給人「登記」的僥倖心態，使用中性確認語氣
+                return f"✅ **{reporter_name}** {report_date_str} 的回報狀態：**已完成**，請勿再次操作。"
+
+            # 儲存回報
+            cur.execute("INSERT INTO reports (source_id, report_date, name) VALUES (%s, %s, %s);", (group_id, report_date, reporter_name))
             conn.commit()
             return f"🎉 **{reporter_name}** 成功回報 {report_date_str}！"
     except Exception as e:
@@ -198,7 +202,7 @@ def handle_message(event):
             reporter_name = match_delete.group(1).strip()
             reply_text = delete_reporter(group_id, reporter_name)
 
-        # 1.6 處理「查詢名單 / 查看人員」指令 (新增此處功能)
+        # 1.6 處理「查詢名單 / 查看人員」指令
         if text_to_match in ["查詢名單", "查看人員", "名單", "list"]:
             reply_text = get_reporter_list(group_id)
 
@@ -253,7 +257,7 @@ def send_daily_reminder(line_bot_api):
             
             with conn.cursor() as cur:
                 for reporter_name in reporters:
-                    # 檢查該回報人在該日期是否有報告記錄 (使用 reports 表，欄位改為 source_id)
+                    # 檢查該回報人在該日期是否有報告記錄
                     cur.execute("SELECT name FROM reports WHERE source_id = %s AND report_date = %s AND name = %s;", 
                                 (group_id, check_date, reporter_name))
                     
