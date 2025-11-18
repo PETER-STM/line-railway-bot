@@ -30,6 +30,7 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 def get_db_connection():
     """建立資料庫連線"""
     try:
+        # 使用 DSN (Connection String) 連線
         conn = psycopg2.connect(DATABASE_URL)
         return conn
     except Exception as e:
@@ -74,7 +75,6 @@ def ensure_tables_exist():
             """)
             
             # 初始化暫停狀態 (如果 settings 表格是新的)
-            # 檢查 'is_paused' 鍵是否存在，如果不存在則設定為 'false'
             cur.execute("SELECT COUNT(*) FROM settings WHERE key = 'is_paused';")
             if cur.fetchone()[0] == 0:
                 cur.execute("INSERT INTO settings (key, value) VALUES ('is_paused', 'false');")
@@ -381,6 +381,9 @@ def handle_message(event):
             print(f"LINE API Reply Error: {e.status_code}, {e.message}", file=sys.stderr)
             
 # --- 啟動 Flask 應用 ---
+# Gunicorn 會使用 Procfile 中指定的 $PORT (通常為 8080)。
+# 這裡的 if __name__ == "__main__": 塊僅用於本地開發/測試。
 if __name__ == "__main__":
-    port = int(os.environ.get('PORT', 5000))
+    # 使用環境變數 $PORT，如果沒有則使用 8080 作為本地開發的默認端口。
+    port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
