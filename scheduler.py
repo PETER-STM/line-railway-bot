@@ -14,6 +14,10 @@ from linebot.models import TextSendMessage
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
+# NEW: 排除的群組ID列表 (用於跳過特定群組的提醒)
+EXCLUDE_GROUP_IDS_STR = os.environ.get('EXCLUDE_GROUP_IDS', '')
+EXCLUDE_GROUP_IDS = set(EXCLUDE_GROUP_IDS_STR.split(',')) if EXCLUDE_GROUP_IDS_STR else set()
+
 # --- 診斷與初始化 ---
 if not LINE_CHANNEL_ACCESS_TOKEN or not DATABASE_URL:
     print("ERROR: Missing required environment variables for scheduler! Cannot start worker.", file=sys.stderr)
@@ -37,83 +41,107 @@ def get_db_connection():
         print(f"DATABASE CONNECTION ERROR in scheduler: {e}", file=sys.stderr)
         return None
 
-# --- 資料庫輔助函式 ---
-def get_all_reporters(conn):
-    """從 group_reporters 表格中獲取所有群組和回報者名稱"""
-    cur = conn.cursor()
-    # 這裡假設 group_id 是 reports 表格中的 source_id
-    cur.execute("SELECT group_id, reporter_name FROM group_reporters ORDER BY group_id;")
-    all_reporters = cur.fetchall()
-    return all_reporters
+# --- NEW: 全域設定檢查函式 ---
+def get_pause_state(conn):
+    """從資料庫檢查全域提醒是否已暫停。"""
+    is_paused = False
+    try:
+        with conn.cursor() as cur:
+            # 確保資料表中 'is_paused' 鍵存在 (如果不存在，則插入預設值)
+            cur.execute("INSERT INTO settings (key, value) VALUES ('is_paused', 'false') ON CONFLICT (key) DO NOTHING;")
+            conn.commit()
+            
+            # 查詢當前狀態
+            cur.execute("SELECT value FROM settings WHERE key = 'is_paused';")
+            result = cur.fetchone()
+            if result and result[0] == 'true':
+                is_paused = True
+    except Exception as e:
+        print(f"DB ERROR (get_pause_state): {e}", file=sys.stderr)
+        # 如果資料庫連線失敗，為了安全起見，不暫停提醒 (除非主應用程式已明確暫停)
+    return is_paused
 
-# --- 核心邏輯：發送每日提醒 ---
+# --- 排程任務邏輯 ---
 def send_daily_reminder_task():
-    """排程工作：檢查前一天的回報並發送 LINE 提醒"""
-    if line_bot_api is None:
-        print("Scheduler task skipped: LINE API is not initialized.", file=sys.stderr)
+    """檢查昨天的回報狀態，並對未回報的群組發送催交通知。"""
+    
+    conn = get_db_connection()
+    if conn is None or line_bot_api is None:
+        print("Scheduler skipped: DB or Line API initialization failed.", file=sys.stderr)
+        return
+        
+    # --- NEW: 1. 檢查全域暫停狀態 ---
+    is_paused = get_pause_state(conn)
+    if is_paused:
+        print("Scheduler is paused globally. Skipping daily reminder check.", file=sys.stderr)
+        if conn: conn.close()
         return
 
-    conn = get_db_connection()
-    if conn is None:
-        print("Scheduler task skipped due to database connection failure.", file=sys.stderr)
-        return 
-
-    # 檢查昨天 (今天執行，檢查昨天的進度)
+    # 檢查前一天 (昨天) 的回報狀態
     check_date = datetime.now().date() - timedelta(days=1)
     check_date_str = check_date.strftime('%Y.%m.%d')
     
-    print(f"--- Running daily reminder check for date: {check_date_str} ---", file=sys.stderr)
+    print(f"--- Scheduler running check for date: {check_date_str} ---", file=sys.stderr)
 
     try:
-        all_reporters = get_all_reporters(conn)
-        
-        # 將回報者按群組 ID 分組
-        groups_to_check = {}
-        for group_id, reporter_name in all_reporters:
-            if group_id not in groups_to_check:
-                groups_to_check[group_id] = []
-            groups_to_check[group_id].append(reporter_name)
-
-        for group_id, reporters in groups_to_check.items():
-            missing_reports = []
+        with conn.cursor() as cur:
+            # 獲取所有群組的回報者名單
+            cur.execute("SELECT group_id, reporter_name FROM group_reporters ORDER BY group_id, reporter_name;")
+            all_reporters = cur.fetchall()
             
-            with conn.cursor() as cur:
-                # 檢查每個回報者是否在 'reports' 表中有昨日的記錄
+            if not all_reporters:
+                print("No reporters registered across all groups. Skipping.", file=sys.stderr)
+                return
+
+            groups_to_check = {}
+            for group_id, reporter_name in all_reporters:
+                # NEW: 排除特定群組
+                if group_id in EXCLUDE_GROUP_IDS:
+                    continue 
+
+                if group_id not in groups_to_check:
+                    groups_to_check[group_id] = []
+                groups_to_check[group_id].append(reporter_name)
+
+            for group_id, reporters in groups_to_check.items():
+                missing_reports = []
+                
+                # 檢查未回報者
                 for reporter_name in reporters:
-                    # 注意：reports 表中的欄位是 group_id, report_date, name
                     cur.execute("SELECT name FROM reports WHERE group_id = %s AND report_date = %s AND name = %s;", 
                                 (group_id, check_date, reporter_name))
                     
                     if not cur.fetchone():
                         missing_reports.append(reporter_name)
 
-            if missing_reports:
-                is_singular = len(missing_reports) == 1
-                
-                # --- 心得催交模板 ---
-                message_text = f"⏰ 心得催交提醒\n\n"
-                message_text += f"大家好～\n"
-                message_text += f"截至 {check_date_str}，以下同學的心得還沒交👇\n\n"
-                
-                missing_list_text = "\n".join([f"👉 {name}" for name in missing_reports])
-                message_text += missing_list_text
-                
-                if is_singular:
-                    message_text += "\n\n📌 小提醒：再不交心得，我的 咚錢模式就要開啟啦💸\n"
-                    message_text += "💡 快交上來吧，別讓我每天都在追著你問～\n\n"
-                    message_text += "期待看到你的 心得分享，別讓我一直盯著這份名單 😏"
-                else:
-                    message_text += "\n\n📌 小提醒：再不交心得，我的 咚錢模式就要開啟啦💸\n"
-                    message_text += "💡 快交上來吧，別讓我每天都在追著你們問～\n\n"
-                    message_text += "期待看到你們的 心得分享，別讓我一直盯著這份名單 😏"
-                # --- 模板結束 ---
-                
-                try:
-                    # 使用 PUSH 訊息發送提醒
-                    line_bot_api.push_message(group_id, TextSendMessage(text=message_text))
-                    print(f"Sent reminder to group {group_id} for {len(missing_reports)} missing reports.", file=sys.stderr)
-                except LineBotApiError as e:
-                    print(f"LINE API PUSH ERROR to {group_id}: {e}", file=sys.stderr)
+                # 構造並發送 push 訊息
+                if missing_reports:
+                    is_singular = len(missing_reports) == 1
+                    
+                    message_text = f"🚨 心得催交通知 🚨\n\n"
+                    message_text += f"大家好～\n"
+                    message_text += f"截至 {check_date_str}，以下同學的心得還沒交👇\n\n"
+                    
+                    missing_list_text = "\n".join([f"👉 {name}" for name in missing_reports])
+                    message_text += missing_list_text
+                    
+                    # --- 催交模板 ---
+                    if is_singular:
+                        message_text += "\n\n📌 小提醒：再不交心得，我的 咚錢模式就要開啟啦💸\n"
+                        message_text += "💡 快交上來吧，別讓我每天都在追著你問～\n\n"
+                        message_text += "期待看到你的 心得分享，別讓我一直盯著這份名單 😏"
+                    else:
+                        message_text += "\n\n📌 小提醒：再不交心得，我的 咚錢模式就要開啟啦💸\n"
+                        message_text += "💡 快交上來吧，別讓我每天都在追著你們問～\n\n"
+                        message_text += "期待看到你們的 心得分享，別讓我一直盯著這份名單 😏"
+                    # --- 模板結束 ---
+                    
+                    try:
+                        # 使用 PUSH 訊息發送提醒
+                        line_bot_api.push_message(group_id, TextSendMessage(text=message_text))
+                        print(f"Sent reminder to group {group_id} for {len(missing_reports)} missing reports.", file=sys.stderr)
+                    except LineBotApiError as e:
+                        print(f"LINE API PUSH ERROR to {group_id}: {e}", file=sys.stderr)
                     
     except Exception as e:
         print(f"SCHEDULER DB/Logic ERROR: {e}", file=sys.stderr)
@@ -129,15 +157,11 @@ TARGET_TIME_UTC = "01:00"
 
 schedule.every().day.at(TARGET_TIME_UTC).do(send_daily_reminder_task)
 
-# Worker 啟動主循環
-if __name__ == "__main__":
-    print(f"Worker process started. Daily task scheduled for {TARGET_TIME_UTC} UTC.", file=sys.stderr)
-    while True:
-        try:
-            # 運行所有等待執行的排程任務
-            schedule.run_pending()
-            # 讓 CPU 休息一下，每秒檢查一次
-            time.sleep(1) 
-        except Exception as e:
-            print(f"Error in scheduler loop: {e}", file=sys.stderr)
-            time.sleep(5) # 發生錯誤時稍等一下
+# 啟動排程循環
+while True:
+    try:
+        schedule.run_pending()
+        time.sleep(1)
+    except Exception as e:
+        print(f"Scheduler loop error: {e}", file=sys.stderr)
+        time.sleep(5) # 發生錯誤時暫停一下
