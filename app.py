@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError, LineBotApiError, LineBotApiError
+from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, SourceGroup, SourceRoom, SourceUser
 import psycopg2
 
@@ -99,7 +99,6 @@ def setup_database_tables():
             conn.close()
 
 # 在應用程式啟動時執行資料庫設定
-# 注意：在 gunicorn 多 worker 環境中，每個 worker 啟動時都會執行一次
 with app.app_context():
     setup_database_tables()
 
@@ -258,15 +257,22 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     text = event.message.text
-    # 取得群組ID，如果是單人聊天則使用 User ID
+    
+    # 修正: 根據 Source 類型使用正確的 ID 屬性 (group_id, room_id, user_id)
     group_id = None
-    if isinstance(event.source, (SourceGroup, SourceRoom)):
-        group_id = event.source.source_id
+    if isinstance(event.source, SourceGroup):
+        # 群組 ID
+        group_id = event.source.group_id
+    elif isinstance(event.source, SourceRoom):
+        # 聊天室 ID
+        group_id = event.source.room_id
     elif isinstance(event.source, SourceUser):
-        group_id = event.source.user_id # 暫時用 User ID 作為 group_id
+        # 單人聊天 ID
+        group_id = event.source.user_id 
 
     if group_id is None:
-        return # 無法識別來源，忽略
+        # 無法識別來源，忽略
+        return
 
     text_to_match = text.strip().replace('（', '(').replace('）', ')')
     reply_text = None
