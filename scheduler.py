@@ -1,9 +1,9 @@
 import os
 import sys
 import re
-# 移除對 time 和 schedule 的依賴
 from datetime import datetime, timedelta
 import psycopg2
+import argparse # 新增：用於處理命令列參數
 
 # 引入 LINE Bot 相關
 from linebot import LineBotApi
@@ -16,14 +16,15 @@ def normalize_name(name):
     對人名進行正規化處理，主要移除開頭的班級或編號標記。
     例如: "(三) 浣熊🦝" -> "浣熊🦝"
     """
-    # 移除開頭被括號 (圓括號、全形括號、方括號、書名號) 包裹的內容，例如 (三), (二), 【1】, [A]
+    # 移除開頭被括號 (圓括號、全形括號、方括號、書名號) 包裹的內容
     # 匹配模式: ^(起始) + 任意空白 + 括號開頭 + 非括號內容(1到10個) + 括號結尾 + 任意空白
-    normalized = re.sub(r'^\s*[\(（\[【][^()\\[\]]{1,10}[\)）\]】]\s*', '', name).strip()
+    normalized = re.sub(r'^\s*[\(（\[【][^()\[\]]{1,10}[\)）\]】]\s*', '', name).strip()
     
     # 如果正規化結果為空，返回原始名稱
     return normalized if normalized else name
 
 # --- 環境變數設定 ---
+# 確保環境變數已設置，否則腳本會立即退出
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 # NEW: 排除的群組ID列表 (用於跳過特定群組的提醒)
@@ -35,6 +36,7 @@ if not LINE_CHANNEL_ACCESS_TOKEN or not DATABASE_URL:
     # 這是 cron job 執行時的重要訊息
     print("FATAL ERROR: Missing required environment variables (LINE_CHANNEL_ACCESS_TOKEN or DATABASE_URL). Script exiting.", file=sys.stderr)
     line_bot_api = None
+    # 這裡直接退出，避免後續程式碼執行
     sys.exit(1)
 else:
     try:
@@ -49,117 +51,117 @@ else:
 def get_db_connection():
     """建立資料庫連線並返回連線物件。"""
     try:
-        # 為了與 app.py 一致並確保安全連線
-        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        # 由於 Railway 的 DATABASE_URL 已經包含所有連線資訊
+        conn = psycopg2.connect(DATABASE_URL)
         return conn
     except Exception as e:
-        print(f"DATABASE CONNECTION ERROR: {e}", file=sys.stderr)
+        print(f"Database connection error: {e}", file=sys.stderr)
         return None
 
-# --- 排程核心函式 ---
-def check_and_send_reminders(days_ago):
-    """檢查指定日期的心得提交情況並發送催繳提醒。"""
-    if days_ago not in (0, 1):
-        print(f"Invalid days_ago parameter: {days_ago}. Must be 0 or 1.", file=sys.stderr)
-        sys.exit(1)
-        
-    print(f"--- Scheduler check started for {days_ago} days ago. ---", file=sys.stderr)
-    
-    conn = get_db_connection()
-    if not conn:
-        print("Skipping reminder check due to database connection failure.", file=sys.stderr)
-        return 
-
+# --- 排程任務邏輯 ---
+def check_and_send_reminders(days_ago=1):
+    """
+    檢查指定日期前應提交但未提交心得的 VIP，並發送提醒訊息。
+    - days_ago=1 檢查昨日 (補交提醒)
+    - days_ago=0 檢查今日 (當日提醒)
+    """
+    conn = None
     try:
-        with conn.cursor() as cursor:
-            # (A) 查詢所有有 VIP 的群組 ID (使用 vips 表，與 app.py 保持一致)
-            cursor.execute("SELECT DISTINCT group_id FROM vips;")
-            group_ids = [row[0] for row in cursor.fetchall()]
+        conn = get_db_connection()
+        if not conn: return
+
+        cursor = conn.cursor()
+
+        # 根據 days_ago 計算目標日期 (以 UTC 時間為準，但資料庫和報告日期都是日期格式，所以計算方式一樣)
+        target_date = (datetime.utcnow().date() - timedelta(days=days_ago))
+        
+        # 根據 days_ago 設定訊息文字
+        if days_ago == 1:
+            target_day_text = "昨日"
+            reminder_text_ending = "大家快來補交吧～\\n\\n不要逼系統變成奧客催款模式 😌"
+        elif days_ago == 0:
+            target_day_text = "今日"
+            reminder_text_ending = "請各位 VIP 記得在期限內提交！\\n\\n不然會被補交大隊追殺喔 🔪"
+        else:
+             # 不應該發生
+             print(f"ERROR: Invalid days_ago value: {days_ago}", file=sys.stderr)
+             return
+
+        # 1. 取得所有活躍的群組 ID
+        cursor.execute("SELECT DISTINCT group_id FROM vips_list;")
+        all_group_ids = [row[0] for row in cursor.fetchall()]
+
+        # 2. 針對每個群組檢查
+        for group_id in all_group_ids:
             
-            # 計算目標日期
-            target_date = (datetime.utcnow() - timedelta(days=days_ago)).date()
-            target_day_text = "昨日" if days_ago == 1 else "今日"
+            if group_id in EXCLUDE_GROUP_IDS:
+                print(f"Skipping group {group_id} due to EXCLUDE_GROUP_IDS setting.", file=sys.stderr)
+                continue
+
+            # 2a. 取得該群組的 VIP 名單
+            cursor.execute(
+                "SELECT reporter_name FROM vips_list WHERE group_id = %s;",
+                (group_id,)
+            )
+            all_vips = [row[0] for row in cursor.fetchall()]
             
-            # 提醒訊息結尾
-            reminder_text_ending = "大家快來補交吧～\n\n不要逼系統變成奧客催款模式 😌"
-            if days_ago == 0:
-                 # 當天檢查可以給予更友善的提醒
-                reminder_text_ending = "提醒各位貴賓，別忘了今日也要提交心得喔！\n\n（你的心得會讓我們更美好。）"
-
-
-            for group_id in group_ids:
-                if group_id in EXCLUDE_GROUP_IDS:
-                    print(f"Skipping excluded group: {group_id}", file=sys.stderr)
-                    continue
-
-                # (B) 獲取該群組所有 VIP 名單 (vip_name 欄位現已儲存正規化後的名稱)
-                cursor.execute(
-                    "SELECT vip_name FROM vips WHERE group_id = %s;",
-                    (group_id,)
-                )
-                unique_normalized_vips = set(row[0] for row in cursor.fetchall())
+            # 將 VIP 名單正規化，用於比對
+            unique_normalized_vips = sorted(list(set(normalize_name(vip) for vip in all_vips)))
+            
+            if not unique_normalized_vips:
+                print(f"Warning: No VIPs defined for group {group_id}. Skipping.", file=sys.stderr)
+                continue
                 
-                if not unique_normalized_vips:
-                    print(f"Group {group_id} has no VIPs set. Skipping.", file=sys.stderr)
-                    continue
+            # 2b. 取得目標日期該群組已提交心得的人名 (正規化後)
+            cursor.execute(
+                "SELECT DISTINCT reporter_name FROM reports WHERE group_id = %s AND report_date = %s;",
+                (group_id, target_date)
+            )
+            submitted_names = [row[0] for row in cursor.fetchall()]
+            submitted_normalized_names = {normalize_name(name) for name in submitted_names}
 
-                # (C) 取得目標日期該群組已提交心得的人名，並進行正規化
-                cursor.execute(
-                    "SELECT DISTINCT reporter_name FROM reports WHERE group_id = %s AND report_date = %s;",
-                    (group_id, target_date)
+            # 2c. 找出未交心得的人名 (根據正規化後的名稱)
+            # 只有當正規化後的 VIP 不在正規化後的已提交名單中，才算遺漏
+            missing_normalized_reports = sorted([vip for vip in unique_normalized_vips if vip not in submitted_normalized_names])
+
+            if missing_normalized_reports:
+                # 準備發送提醒訊息
+                list_of_names = "\\n".join([f"- {name}" for name in missing_normalized_reports])
+                
+                # 訊息內容根據是檢查昨日還是今日來調整
+                message_text = (
+                    f"📢 心得分享催繳大隊報到 📢\\n"
+                    f"日期: {target_date.strftime('%Y/%m/%d')} ({target_day_text})\\n\\n"
+                    f"以下 VIP 仍未交心得：\\n"
+                    f"{list_of_names}\\n\\n"
+                    f"{reminder_text_ending}"
                 )
-                submitted_names = {row[0] for row in cursor.fetchall()}
-                submitted_normalized_names = {normalize_name(name) for name in submitted_names}
 
-                # (D) 找出未交心得的人名 (使用正規化後的名稱進行比對)
-                missing_normalized_reports = sorted([vip for vip in unique_normalized_vips if vip not in submitted_normalized_names])
-
-                if missing_normalized_reports:
-                    # 準備發送提醒訊息
-                    list_of_names = "\n".join([f"- {name}" for name in missing_normalized_reports])
+                try:
+                    # 使用 PUSH 訊息發送提醒
+                    line_bot_api.push_message(group_id, TextSendMessage(text=message_text))
+                    print(f"Sent reminder to group {group_id} for {len(missing_normalized_reports)} missing reports for date {target_date}.", file=sys.stderr)
+                except LineBotApiError as e:
+                    print(f"LINE API PUSH ERROR to {group_id}: {e}", file=sys.stderr)
                     
-                    # 訊息內容根據是檢查昨日還是今日來調整
-                    message_text = (
-                        f"📢 心得分享催繳大隊報到 📢\n"
-                        f"日期: {target_date.strftime('%Y/%m/%d')} ({target_day_text})\n\n"
-                        f"以下 VIP 仍未交心得：\n"
-                        f"{list_of_names}\n\n"
-                        f"{reminder_text_ending}"
-                    )
-
-                    try:
-                        # 使用 PUSH 訊息發送提醒
-                        line_bot_api.push_message(group_id, TextSendMessage(text=message_text))
-                        print(f"Sent reminder to group {group_id} for {len(missing_normalized_reports)} missing reports for date {target_date}.", file=sys.stderr)
-                    except LineBotApiError as e:
-                        print(f"LINE API PUSH ERROR to {group_id}: {e}", file=sys.stderr)
-                        
     except Exception as e:
         print(f"SCHEDULER DB/Logic ERROR: {e}", file=sys.stderr)
     finally:
         if conn: conn.close()
     
-    print("--- Scheduler check finished. ---\n", file=sys.stderr)
+    print(f"--- Scheduler check for days_ago={days_ago} finished. ---\\n", file=sys.stderr)
 
-
-# --- 執行排程主入口 (依賴 Cron Job 傳入的參數) ---
+# --- 主程式執行區塊 (只執行一次) ---
 if __name__ == "__main__":
-    # 預期 Cron Job 執行時傳入一個參數: 0 (檢查當日) 或 1 (檢查前一日)
-    if len(sys.argv) != 2:
-        print("Usage: python scheduler.py <days_ago: 0 or 1>", file=sys.stderr)
-        sys.exit(1)
-        
-    try:
-        days_ago = int(sys.argv[1])
-        if days_ago not in (0, 1):
-             raise ValueError("days_ago must be 0 or 1.")
-        
-        # 執行排程檢查
-        check_and_send_reminders(days_ago)
-        
-    except ValueError as e:
-        print(f"Invalid argument: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    # 執行完畢，程序退出
-    sys.exit(0)
+    parser = argparse.ArgumentParser(description="Cron-based scheduler for sending reminders.")
+    # 定義 --days-ago 參數，預設為 1 (檢查昨日)
+    parser.add_argument(
+        '--days-ago', 
+        type=int, 
+        default=1, 
+        help='Number of days ago to check (1 for yesterday, 0 for today).'
+    )
+    args = parser.parse_args()
+    
+    # 執行一次檢查函式
+    check_and_send_reminders(args.days_ago)
