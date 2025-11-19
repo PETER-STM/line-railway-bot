@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timedelta
 import schedule 
 import psycopg2
+from dateutil import tz # 處理時區
 
 # 引入 LINE Bot 相關
 from linebot import LineBotApi
@@ -34,154 +35,84 @@ else:
 def get_db_connection():
     """建立資料庫連線"""
     try:
-        return psycopg2.connect(DATABASE_URL)
+        # 連線到 PostgreSQL，使用 sslmode='require' 以符合 Heroku/Railway 要求
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        return conn
     except Exception as e:
-        print(f"DATABASE CONNECTION ERROR: {e}", file=sys.stderr)
+        print(f"DATABASE CONNECTION ERROR in scheduler: {e}", file=sys.stderr)
         return None
 
-# --- 資料庫初始化函式 ---
-def ensure_tables_exist():
-    """檢查並建立所有必需的資料庫表 (group_reporters, reports, settings)"""
+# --- 排程任務邏輯 ---
+
+def check_and_remind_reports():
+    """檢查所有群組，找出今日尚未回報的成員並發送提醒"""
+    if line_bot_api is None:
+        print("Scheduler skipped: LineBotApi not initialized.", file=sys.stderr)
+        return
+
     conn = get_db_connection()
     if conn is None:
-        print("ERROR: Failed to establish database connection for table creation in scheduler.", file=sys.stderr)
-        return False
-    
-    cur = conn.cursor()
-    success = True
-    try:
-        # 1. group_reporters 表 (存放群組ID和成員姓名)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS group_reporters (
-                group_id VARCHAR(255) NOT NULL,
-                reporter_name VARCHAR(255) NOT NULL,
-                PRIMARY KEY (group_id, reporter_name)
-            );
-        """)
-        
-        # 2. reports 表 (存放每日回報紀錄)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS reports (
-                group_id VARCHAR(255) NOT NULL,
-                report_date DATE NOT NULL,
-                reporter_name VARCHAR(255) NOT NULL,
-                PRIMARY KEY (group_id, report_date, reporter_name)
-            );
-        """)
-        
-        # 3. settings 表 (存放全域設定，例如提醒是否暫停)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key VARCHAR(255) PRIMARY KEY,
-                value VARCHAR(255) NOT NULL
-            );
-        """)
-        
-        conn.commit()
-        print("INFO: Scheduler DB tables checked/created successfully.", file=sys.stderr)
-    except Exception as e:
-        print(f"SCHEDULER DATABASE INITIALIZATION ERROR: {e}", file=sys.stderr)
-        conn.rollback()
-        success = False
-    finally:
-        if conn: conn.close()
-    
-    return success
-
-# --- 全域設定函式 ---
-def is_global_pause_state(conn) -> bool:
-    """檢查全域提醒是否暫停，使用傳入的連線"""
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT value FROM settings WHERE key = 'is_paused';")
-        result = cur.fetchone()
-        if result and result[0].lower() == 'true':
-            return True
-        return False
-    except Exception as e:
-        # 如果表不存在或發生其他錯誤，會被 ensure_tables_exist() 處理
-        print(f"DB CHECK ERROR (is_global_pause_state in scheduler): {e}", file=sys.stderr)
-        return False
-
-# --- 每日提醒檢查核心邏輯 ---
-def check_daily_reminder():
-    """
-    主要執行函式，在每日排程時間執行。
-    檢查所有群組昨天的心得回報狀態，並對未回報者發送提醒。
-    """
-    # 確保 Bot API 初始化成功
-    if not line_bot_api:
-        print("ERROR: LineBotApi is not initialized. Skipping check.", file=sys.stderr)
-        return
-
-    # 確保資料庫表存在
-    if not ensure_tables_exist():
-        print("ERROR: Database tables are not available. Skipping check.", file=sys.stderr)
-        return
-        
-    conn = get_db_connection()
-    if conn is None:
-        print("ERROR: Database connection failed in scheduler. Skipping check.", file=sys.stderr)
         return
 
     cur = conn.cursor()
-
     try:
-        # 1. NEW: 檢查全域提醒是否暫停
-        if is_global_pause_state(conn):
-            print("INFO: Global reminder is PAUSED. Skipping all groups.", file=sys.stderr)
-            return
-            
-        # 2. 確定要檢查的日期 (昨天)
-        yesterday_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-        yesterday_display = (datetime.now() - timedelta(days=1)).strftime('%Y.%m.%d')
-        print(f"INFO: Starting daily check for reports on {yesterday_date}", file=sys.stderr)
+        # 今天的日期 (使用 Asia/Taipei 時區)
+        date_today = datetime.now(tz=tz.gettz('Asia/Taipei')).date()
+        date_today_str = date_today.strftime('%Y-%m-%d')
+        date_today_display = date_today.strftime('%Y.%m.%d')
+        print(f"--- Running scheduler check for {date_today_str} ---", file=sys.stderr)
 
-        # 3. 取得所有有註冊人名的群組 ID
-        cur.execute("SELECT DISTINCT group_id FROM group_reporters;")
-        all_group_ids = [r[0] for r in cur.fetchall()]
-        
-        # 4. 逐一處理每個群組
-        for group_id in all_group_ids:
-            
-            # 排除不提醒的群組
+        # 1. 取得所有有成員的群組 ID
+        cur.execute("SELECT DISTINCT group_id FROM reporters")
+        group_ids = [row[0] for row in cur.fetchall()]
+
+        for group_id in group_ids:
             if group_id in EXCLUDE_GROUP_IDS:
-                print(f"INFO: Skipping excluded group: {group_id}", file=sys.stderr)
+                print(f"Skipping excluded group: {group_id}", file=sys.stderr)
                 continue
-            
-            # 取得該群組所有應回報的人員
-            cur.execute("SELECT reporter_name FROM group_reporters WHERE group_id = %s;", (group_id,))
-            all_reporters = {r[0] for r in cur.fetchall()}
+
+            # 2. 找出該群組中所有成員
+            cur.execute(
+                "SELECT reporter_name FROM reporters WHERE group_id = %s ORDER BY reporter_name",
+                (group_id,)
+            )
+            all_reporters = [row[0] for row in cur.fetchall()]
 
             if not all_reporters:
-                print(f"INFO: Group {group_id} has no registered reporters. Skipping.", file=sys.stderr)
                 continue
 
-            # 取得昨天已回報的人員
-            cur.execute("SELECT reporter_name FROM reports WHERE group_id = %s AND report_date = %s;", 
-                        (group_id, yesterday_date))
-            reported_reporters = {r[0] for r in cur.fetchall()}
-            
-            # 計算未回報人員
-            missing_reports = sorted(list(all_reporters - reported_reporters))
+            # 3. 找出該群組中今日已回報的成員
+            cur.execute(
+                "SELECT reporter_name FROM reports WHERE group_id = %s AND report_date = %s",
+                (group_id, date_today_str)
+            )
+            reported_reporters = set(row[0] for row in cur.fetchall())
+
+            # 4. 計算尚未回報的成員
+            missing_reports = [name for name in all_reporters if name not in reported_reporters]
 
             if missing_reports:
-                # --- 建立提醒訊息模板 ---
-                missing_names = "\n🔸 ".join(missing_reports)
-                
-                message_text = f"📢 **昨日心得追蹤提醒 ({yesterday_display})**\n\n"
-                
+                missing_list_str = "\n" + "\n".join(missing_reports) # 準備成員列表 (無前面的 - )
+
+                # --- 訊息模板 (活潑風格) ---
                 if len(missing_reports) == 1:
-                    # 單人提醒
-                    message_text += f"⚠️ **{missing_reports[0]}**，你的心得還沒交喔！\n\n"
-                    message_text += "💡 快交上來吧，別讓我每天都在追著你問～\n\n"
-                    message_text += "期待看到你的 心得分享，別讓我一直盯著這份名單 😏"
+                    reporter_name = missing_reports[0]
+                    # 單人未回報
+                    message_text = (
+                        f"🔔 心得分享提醒 🔔\n今天快截止囉～\n\n"
+                        f"目前還沒收到 **{reporter_name}** 的回報 ({date_today_display})。\n"
+                        f"兄弟姊妹，別再拖了，\n"
+                        f"再不回報我都要先幫你寫一篇了 😏"
+                    )
                 else:
-                    # 多人提醒
-                    message_text += f"🚨 以下 {len(missing_reports)} 位成員尚未完成回報：\n\n🔸 {missing_names}\n\n"
-                    message_text += "📌 小提醒：再不交心得，我的 咚錢模式就要開啟啦💸\n"
-                    message_text += "💡 快交上來吧，別讓我每天都在追著你們問～\n\n"
-                    message_text += "期待看到你們的 心得分享，別讓我一直盯著這份名單 😏"
+                    # 多人未回報
+                    message_text = (
+                        f"📢 心得分享催繳大隊報到 📢\n"
+                        f"以下 VIP 仍未交心得：\n"
+                        f"{missing_list_str}\n\n"
+                        f"大家快來補交吧～\n"
+                        f"不要逼系統變成奧客催款模式 😌"
+                    )
                 # --- 模板結束 ---
                 
                 try:
@@ -190,7 +121,7 @@ def check_daily_reminder():
                     print(f"Sent reminder to group {group_id} for {len(missing_reports)} missing reports.", file=sys.stderr)
                 except LineBotApiError as e:
                     print(f"LINE API PUSH ERROR to {group_id}: {e}", file=sys.stderr)
-                
+                    
     except Exception as e:
         print(f"SCHEDULER DB/Logic ERROR: {e}", file=sys.stderr)
     finally:
@@ -199,16 +130,15 @@ def check_daily_reminder():
     print("--- Scheduler check finished. ---", file=sys.stderr)
 
 # --- 排程設定與執行 ---
-if line_bot_api:
-    # 確保資料庫在啟動時被初始化
-    ensure_tables_exist() 
-    
-    # 設定每天在 UTC 01:00 執行檢查 (對應台灣時間 TST 09:00)
-    schedule.every().day.at("01:00").do(check_daily_reminder)
 
-    print("INFO: Scheduler worker is running. Next check at 01:00 UTC.", file=sys.stderr)
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
-else:
-    print("WARNING: Scheduler failed to start due to missing config or LineBotApi initialization error.", file=sys.stderr)
+# 設定每天在 UTC 01:00 執行檢查 (對應台北時間 UTC+8 的早上 9:00)
+schedule.every().day.at("01:00").do(check_and_remind_reports)
+
+if __name__ == "__main__":
+    if LINE_CHANNEL_ACCESS_TOKEN and DATABASE_URL:
+        print("Scheduler worker started. Checking reports daily at 01:00 UTC (9:00 AM TST).", file=sys.stderr)
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
+    else:
+        print("Scheduler is not running due to missing environment variables.", file=sys.stderr)

@@ -68,7 +68,6 @@ def setup_database_tables():
         """)
 
         # 2. reports (紀錄心得分享完成的歷史)
-        # 修正: 確保 reports 表格包含 group_id 欄位
         cur.execute("""
             CREATE TABLE reports (
                 id SERIAL PRIMARY KEY,
@@ -105,10 +104,13 @@ with app.app_context():
 
 # --- 資料庫操作函式 (核心邏輯) ---
 
+# 活潑風格的通用錯誤訊息
+DB_ERROR_MSG = "💥 發生未知錯誤。\n\n可能是宇宙磁場不順，或系統在叛逆。\n\n稍後再試，或找管理員用愛感化它。"
+
 def add_reporter(group_id, reporter_name):
     """新增成員到名單"""
     conn = get_db_connection()
-    if conn is None: return "❌ 新增成員時發生資料庫連線錯誤！"
+    if conn is None: return DB_ERROR_MSG
     try:
         cur = conn.cursor()
         cur.execute(
@@ -117,19 +119,21 @@ def add_reporter(group_id, reporter_name):
         )
         if cur.rowcount > 0:
             conn.commit()
-            return f"✅ 已將 **{reporter_name}** 新增至本群組的名單中。"
+            # 新增人名 (成功)
+            return f"🎉 好嘞～ **{reporter_name}** 已成功加入名單！\n\n（逃不掉了，祝他順利回報。）"
         else:
-            return f"⚠️ **{reporter_name}** 已經在名單上了，不用重複新增喔！"
+            # 新增人名 (重複)
+            return f"🤨 **{reporter_name}** 早就在名單裡面坐好坐滿了，\n\n你該不會…忘記上一次也加過吧？"
     except Exception as e:
         print(f"ADD REPORTER DB ERROR: {e}", file=sys.stderr)
-        return f"❌ 新增成員時發生資料庫錯誤：{e}"
+        return DB_ERROR_MSG
     finally:
         if conn: conn.close()
 
 def delete_reporter(group_id, reporter_name):
     """從名單中刪除成員"""
     conn = get_db_connection()
-    if conn is None: return "❌ 刪除成員時發生資料庫連線錯誤！"
+    if conn is None: return DB_ERROR_MSG
     try:
         cur = conn.cursor()
         cur.execute(
@@ -138,19 +142,21 @@ def delete_reporter(group_id, reporter_name):
         )
         if cur.rowcount > 0:
             conn.commit()
-            return f"✅ 已將 **{reporter_name}** 從本群組名單中移除。"
+            # 刪除人名 (成功)
+            return f"🗑️ **{reporter_name}** 已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
         else:
-            return f"⚠️ 名單上沒有 **{reporter_name}**，請確認名稱是否正確。"
+            # 刪除人名 (未找到)
+            return f"❓名單裡根本沒有 **{reporter_name}** 啊！\n\n是不是名字打錯，還是你其實不想他回報？"
     except Exception as e:
         print(f"DELETE REPORTER DB ERROR: {e}", file=sys.stderr)
-        return f"❌ 刪除成員時發生資料庫錯誤：{e}"
+        return DB_ERROR_MSG
     finally:
         if conn: conn.close()
 
 def get_reporter_list(group_id):
     """查詢名單列表"""
     conn = get_db_connection()
-    if conn is None: return "❌ 查詢名單時發生資料庫連線錯誤！"
+    if conn is None: return DB_ERROR_MSG
     try:
         cur = conn.cursor()
         cur.execute(
@@ -159,25 +165,27 @@ def get_reporter_list(group_id):
         )
         reporters = [row[0] for row in cur.fetchall()]
         if reporters:
-            list_str = "\n- " + "\n- ".join(reporters)
-            return f"📝 本群組目前的心得分享名單有：{list_str}"
+            # 查詢名單 (有成員)
+            list_str = "\n" + "\n".join(reporters) # 移除前面的 "- " 以符合模板
+            return f"📋 最新回報觀察名單如下：{list_str}\n\n（嗯，看起來大家都還活著。）"
         else:
-            return "📝 目前名單上沒有成員，請使用 `新增人名 [姓名]` 來加入。"
+            # 查詢名單 (無成員)
+            return "📭 名單空空如也～\n\n快用 `新增人名 [姓名]` 把第一位勇者召喚進來吧！"
     except Exception as e:
         print(f"GET REPORTER LIST DB ERROR: {e}", file=sys.stderr)
-        return f"❌ 查詢名單時發生資料庫錯誤：{e}"
+        return DB_ERROR_MSG
     finally:
         if conn: conn.close()
 
 def log_report(group_id, report_date, reporter_name):
     """
     記錄心得分享回報。
-    修正: 在 INSERT 語句中正確使用 group_id 欄位。
     """
     conn = get_db_connection()
-    if conn is None: return "❌ 記錄回報時發生資料庫連線錯誤！"
+    if conn is None: return DB_ERROR_MSG
     try:
         cur = conn.cursor()
+        date_str = report_date.strftime('%Y.%m.%d')
         
         # 1. 檢查是否已記錄
         cur.execute(
@@ -185,57 +193,41 @@ def log_report(group_id, report_date, reporter_name):
             (group_id, report_date, reporter_name)
         )
         if cur.fetchone():
-            return f"⚠️ **{reporter_name}** ({report_date.strftime('%Y.%m.%d')}) 已經回報過了，不用重複記錄喔！"
+            # 記錄回報 (重複記錄)
+            return f"⚠️ **{reporter_name}** ({date_str}) 今天已經回報過了！\n\n別想靠重複交作業刷存在感，我看的很清楚 👀"
             
-        # 2. 檢查人名是否在名單上 (可選，但建議確認)
-        cur.execute(
-            "SELECT reporter_name FROM reporters WHERE group_id = %s AND reporter_name = %s",
-            (group_id, reporter_name)
-        )
-        if not cur.fetchone():
-            # 如果不在名單上，自動加入 (此處僅為輔助，不依賴此處執行加入，讓 add_reporter 處理衝突)
-            pass
-        
         # 3. 執行記錄
         cur.execute(
-            # 修復後的 INSERT 語句
             "INSERT INTO reports (group_id, reporter_name, report_date) VALUES (%s, %s, %s)",
             (group_id, reporter_name, report_date)
         )
         conn.commit()
         
-        # 如果人名不在名單上，自動加入 (如果前面的檢查是空集)
-        # 這裡改用 add_reporter 函式來處理新增邏輯，確保一致性
+        # 自動將人名加入名單（如果不在）
         add_reporter_result = add_reporter(group_id, reporter_name)
         if "已經在名單上了" not in add_reporter_result and "已將" in add_reporter_result:
             print(f"INFO: Automatically added {reporter_name} to reporters list.", file=sys.stderr)
 
-
-        return f"👌 收到！**{reporter_name}** ({report_date.strftime('%Y.%m.%d')}) 的心得分享記錄完成，請大家掌聲鼓勵！"
+        # 記錄回報 (成功)
+        return f"👌 收到！**{reporter_name}** ({date_str}) 的心得已成功登入檔案。\n\n（今天有乖，給你一個隱形貼紙 ⭐）"
         
     except Exception as e:
-        # 這裡會捕捉到您回報的錯誤，但理論上強制重建表格後就不會發生
         print(f"LOG REPORT DB ERROR: {e}", file=sys.stderr)
-        return f"❌ 記錄回報時發生資料庫錯誤：{e}"
+        return DB_ERROR_MSG
     finally:
         if conn: conn.close()
 
-# 測試排程提醒函式 (用於手動觸發)
 def test_daily_reminder(group_id):
-    """手動觸發排程的提醒邏輯，並以回覆訊息方式顯示結果"""
-    try:
-        # 由於 worker 服務是獨立運行的，我們無法直接從 web 服務調用它。
-        # 這裡僅確認是否在排除名單內
-        if group_id in EXCLUDE_GROUP_IDS:
-             return "⚠️ 本群組在排程排除名單中，排程器不會對此群組發送提醒！"
-        else:
-             return "🔔 提醒測試指令已收到。**排程服務 (worker)** 是獨立運行的，它會在設定的時間自動檢查並發送提醒。\n\n**如果您看到 Bot 發送了 PUSH 提醒訊息，則表示 worker 服務運作正常。**"
-    except Exception as e:
-        print(f"TEST REMINDER ERROR: {e}", file=sys.stderr)
-        return f"❌ 提醒測試發生錯誤：{e}"
+    """手動觸發排程的提醒邏輯，並以回覆訊息方式顯示結果 (活潑風格)"""
+    if group_id in EXCLUDE_GROUP_IDS:
+         # 測試排程 (已排除群組)
+         return "🚫 這個群組在「排除名單」裡，\n\n排程器看到這邊會自動裝死，不會發任何提醒。"
+    else:
+         # 測試排程 (正常群組)
+         return "🔔 測試指令 OK！\n\n請坐等排程器在設定時間跳出來嚇你，\n\n以確認系統正常運作。"
 
 
-# --- LINE Bot Webhook 處理 ---
+# --- LINE Bot Webhook 處理 (ID 修正已保留) ---
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -258,20 +250,16 @@ def callback():
 def handle_message(event):
     text = event.message.text
     
-    # 修正: 根據 Source 類型使用正確的 ID 屬性 (group_id, room_id, user_id)
+    # 根據 Source 類型使用正確的 ID 屬性
     group_id = None
     if isinstance(event.source, SourceGroup):
-        # 群組 ID
         group_id = event.source.group_id
     elif isinstance(event.source, SourceRoom):
-        # 聊天室 ID
         group_id = event.source.room_id
     elif isinstance(event.source, SourceUser):
-        # 單人聊天 ID
         group_id = event.source.user_id 
 
     if group_id is None:
-        # 無法識別來源，忽略
         return
 
     text_to_match = text.strip().replace('（', '(').replace('）', ')')
@@ -279,7 +267,6 @@ def handle_message(event):
 
     # 處理特殊指令
     if text_to_match in ["發送提醒測試", "測試排程"]:
-        # 這是手動觸發群組測試的結果
         if reply_text is None:
             reply_text = test_daily_reminder(group_id)
         
@@ -311,12 +298,14 @@ def handle_message(event):
             
             # 確保人名不為空
             if not reporter_name:
-                reply_text = "⚠️ 請在日期後方加上回報者的姓名！"
+                # 記錄回報 (人名遺失)
+                reply_text = "⚠️ 日期後面請記得加上人名，不然我不知道誰交的啊！\n\n（你總不會想讓我自己猜吧？）"
             else:
                 reply_text = log_report(group_id, report_date, reporter_name)
             
         except ValueError:
-            reply_text = "❌ 日期格式不正確。請使用 YYYY.MM.DD 的格式，例如：`2025.11.19 小明`"
+            # 記錄回報 (日期格式錯誤)
+            reply_text = "❌ 日期長得怪怪的。\n\n請用標準格式：YYYY.MM.DD 姓名\n\n（小數點不是你的自由發揮。）"
 
     # 發送回覆訊息
     if reply_text:
@@ -327,7 +316,6 @@ def handle_message(event):
             )
         except LineBotApiError as e:
             print(f"LINE API REPLY ERROR: {e}", file=sys.stderr)
-            # 如果是群組/聊天室，嘗試用 push_message 替代 reply_message (在某些情況下 reply_token 會失效)
             if group_id and group_id not in EXCLUDE_GROUP_IDS:
                 try:
                     line_bot_api.push_message(group_id, TextSendMessage(text=reply_text))
@@ -338,5 +326,4 @@ def handle_message(event):
 # --- 啟動 Flask 應用 ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    # 確保在非 Railway 環境中也能初始化 DB (雖然 Railway 透過 gunicorn 啟動)
     app.run(host='0.0.0.0', port=port)
