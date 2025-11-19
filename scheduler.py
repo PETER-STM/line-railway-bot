@@ -4,7 +4,6 @@ import time
 from datetime import datetime, timedelta
 import schedule 
 import psycopg2
-from dateutil import tz # 處理時區
 
 # 引入 LINE Bot 相關
 from linebot import LineBotApi
@@ -35,86 +34,85 @@ else:
 def get_db_connection():
     """建立資料庫連線"""
     try:
-        # 連線到 PostgreSQL，使用 sslmode='require' 以符合 Heroku/Railway 要求
+        # 連線到 PostgreSQL
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         return conn
     except Exception as e:
-        print(f"DATABASE CONNECTION ERROR in scheduler: {e}", file=sys.stderr)
+        print(f"DATABASE CONNECTION ERROR: {e}", file=sys.stderr)
         return None
 
-# --- 排程任務邏輯 ---
-
-def check_and_remind_reports():
-    """檢查所有群組，找出今日尚未回報的成員並發送提醒"""
+# --- 核心排程邏輯 ---
+def check_and_send_reminders():
+    """
+    檢查所有群組中是否有未回報的成員，並發送提醒。
+    """
     if line_bot_api is None:
-        print("Scheduler skipped: LineBotApi not initialized.", file=sys.stderr)
+        print("LINE Bot API is not initialized. Skipping reminder check.", file=sys.stderr)
         return
+
+    print("--- Starting scheduler check... ---", file=sys.stderr)
 
     conn = get_db_connection()
     if conn is None:
         return
 
     cur = conn.cursor()
-    try:
-        # 今天的日期 (使用 Asia/Taipei 時區)
-        date_today = datetime.now(tz=tz.gettz('Asia/Taipei')).date()
-        date_today_str = date_today.strftime('%Y-%m-%d')
-        date_today_display = date_today.strftime('%Y.%m.%d')
-        print(f"--- Running scheduler check for {date_today_str} ---", file=sys.stderr)
+    # 提醒日期設定為今天 (UTC time)
+    today = datetime.utcnow().date()
+    date_str = today.strftime('%Y.%m.%d')
 
-        # 1. 取得所有有成員的群組 ID
+    try:
+        # 1. 取得所有有成員的 group_id
         cur.execute("SELECT DISTINCT group_id FROM reporters")
         group_ids = [row[0] for row in cur.fetchall()]
 
         for group_id in group_ids:
+            # 跳過排除名單中的群組 (用於開發測試)
             if group_id in EXCLUDE_GROUP_IDS:
                 print(f"Skipping excluded group: {group_id}", file=sys.stderr)
                 continue
 
-            # 2. 找出該群組中所有成員
+            # 2. 取得該群組所有成員名單
             cur.execute(
-                "SELECT reporter_name FROM reporters WHERE group_id = %s ORDER BY reporter_name",
+                "SELECT reporter_name FROM reporters WHERE group_id = %s",
                 (group_id,)
             )
             all_reporters = [row[0] for row in cur.fetchall()]
 
-            if not all_reporters:
-                continue
-
-            # 3. 找出該群組中今日已回報的成員
+            # 3. 取得該群組今天已回報的成員名單
             cur.execute(
                 "SELECT reporter_name FROM reports WHERE group_id = %s AND report_date = %s",
-                (group_id, date_today_str)
+                (group_id, today)
             )
             reported_reporters = set(row[0] for row in cur.fetchall())
 
-            # 4. 計算尚未回報的成員
+            # 4. 找出未回報的成員
             missing_reports = [name for name in all_reporters if name not in reported_reporters]
-
+            
             if missing_reports:
-                missing_list_str = "\n" + "\n".join(missing_reports) # 準備成員列表 (無前面的 - )
-
-                # --- 訊息模板 (活潑風格，已移除粗體和空格) ---
+                # 5. 準備提醒訊息 (使用活潑幽默模板)
+                
                 if len(missing_reports) == 1:
+                    # 單人未回報
                     reporter_name = missing_reports[0]
-                    # 單人未回報 - 移除空格
                     message_text = (
-                        f"🔔 心得分享提醒 🔔\n今天快截止囉～\n\n"
-                        f"目前還沒收到{reporter_name}的回報 ({date_today_display})。\n"
-                        f"兄弟姊妹，別再拖了，\n"
+                        f"🔔 心得分享提醒 🔔\n"
+                        f"今天快截止囉～\n\n"
+                        f"目前還沒收到 {reporter_name} 的回報 ({date_str})。\n"
+                        f"兄弟姊妹，別再拖了，\n\n"
                         f"再不回報我都要先幫你寫一篇了 😏"
                     )
                 else:
-                    # 多人未回報 (此處無人名變數插入，故無需調整)
+                    # 多人未回報
+                    list_of_names = "\n".join(missing_reports)
                     message_text = (
                         f"📢 心得分享催繳大隊報到 📢\n"
-                        f"以下 VIP 仍未交心得：\n"
-                        f"{missing_list_str}\n\n"
-                        f"大家快來補交吧～\n"
+                        f"以下 VIP 仍未交心得：\n\n"
+                        f"{list_of_names}\n\n"
+                        f"大家快來補交吧～\n\n"
                         f"不要逼系統變成奧客催款模式 😌"
                     )
-                # --- 模板結束 ---
-                
+
                 try:
                     # 使用 PUSH 訊息發送提醒
                     line_bot_api.push_message(group_id, TextSendMessage(text=message_text))
@@ -127,18 +125,23 @@ def check_and_remind_reports():
     finally:
         if conn: conn.close()
     
-    print("--- Scheduler check finished. ---", file=sys.stderr)
+    print("--- Scheduler check finished. ---\n", file=sys.stderr)
 
 # --- 排程設定與執行 ---
 
-# 設定每天在 UTC 01:00 執行檢查 (對應台北時間 UTC+8 的早上 9:00)
-schedule.every().day.at("01:00").do(check_and_remind_reports)
+# 設定每天在 UTC 01:00 執行檢查 (對應台灣時間 TST 09:00)
+schedule.every().day.at("01:00").do(check_and_send_reminders)
+
+# 設定每天在 UTC 13:00 執行檢查 (對應台灣時間 TST 21:00，第二次提醒/截止前提醒)
+schedule.every().day.at("13:00").do(check_and_send_reminders)
+
 
 if __name__ == "__main__":
-    if LINE_CHANNEL_ACCESS_TOKEN and DATABASE_URL:
-        print("Scheduler worker started. Checking reports daily at 01:00 UTC (9:00 AM TST).", file=sys.stderr)
-        while True:
-            schedule.run_pending()
-            time.sleep(1)
-    else:
-        print("Scheduler is not running due to missing environment variables.", file=sys.stderr)
+    print("Scheduler worker started.", file=sys.stderr)
+    # 首次啟動時先執行一次，避免剛部署時錯過時間
+    # 注意：在 Heroku/Railway 這類環境，worker 啟動時間可能不固定，因此首次執行很有用
+    check_and_send_reminders() 
+    
+    while True:
+        schedule.run_pending()
+        time.sleep(60) # 每 60 秒檢查一次排程

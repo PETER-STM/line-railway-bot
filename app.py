@@ -119,11 +119,11 @@ def add_reporter(group_id, reporter_name):
         )
         if cur.rowcount > 0:
             conn.commit()
-            # 新增人名 (成功) - 移除空格
-            return f"🎉 好嘞～{reporter_name}已成功加入名單！\n\n（逃不掉了，祝他順利回報。）"
+            # 新增人名 (成功)
+            return f"🎉 好嘞～ {reporter_name} 已成功加入名單！\n\n（逃不掉了，祝他順利回報。）"
         else:
-            # 新增人名 (重複) - 移除空格
-            return f"🤨{reporter_name}早就在名單裡面坐好坐滿了，\n\n你該不會…忘記上一次也加過吧？"
+            # 新增人名 (重複)
+            return f"🤨 {reporter_name} 早就在名單裡面坐好坐滿了，\n\n你該不會…忘記上一次也加過吧？"
     except Exception as e:
         print(f"ADD REPORTER DB ERROR: {e}", file=sys.stderr)
         return DB_ERROR_MSG
@@ -142,11 +142,11 @@ def delete_reporter(group_id, reporter_name):
         )
         if cur.rowcount > 0:
             conn.commit()
-            # 刪除人名 (成功) - 移除空格
-            return f"🗑️{reporter_name}已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
+            # 刪除人名 (成功)
+            return f"🗑️ {reporter_name} 已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
         else:
-            # 刪除人名 (未找到) - 移除空格
-            return f"❓名單裡根本沒有{reporter_name}啊！\n\n是不是名字打錯，還是你其實不想他回報？"
+            # 刪除人名 (未找到)
+            return f"❓名單裡根本沒有 {reporter_name} 啊！\n\n是不是名字打錯，還是你其實不想他回報？"
     except Exception as e:
         print(f"DELETE REPORTER DB ERROR: {e}", file=sys.stderr)
         return DB_ERROR_MSG
@@ -194,7 +194,7 @@ def log_report(group_id, report_date, reporter_name):
         )
         if cur.fetchone():
             # 記錄回報 (重複記錄)
-            return f"⚠️{reporter_name}({date_str})今天已經回報過了！\n\n別想靠重複交作業刷存在感，我看的很清楚 👀"
+            return f"⚠️ {reporter_name} ({date_str}) 今天已經回報過了！\n\n別想靠重複交作業刷存在感，我看的很清楚 👀"
             
         # 2. 準備簡化內容 for report_content (只記錄打卡，忽略詳細日報)
         simple_content = f"打卡紀錄: {date_str} {reporter_name} (內容已省略)"
@@ -207,12 +207,10 @@ def log_report(group_id, report_date, reporter_name):
         conn.commit()
         
         # 自動將人名加入名單（如果不在）
-        add_reporter_result = add_reporter(group_id, reporter_name)
-        if "已經在名單上了" not in add_reporter_result and "已成功加入名單" in add_reporter_result:
-            print(f"INFO: Automatically added {reporter_name} to reporters list.", file=sys.stderr)
+        add_reporter(group_id, reporter_name) 
 
         # 記錄回報 (成功)
-        return f"👍 收到！{reporter_name}({date_str})的心得已成功登入檔案。\n\n（根據您的要求，**只儲存了打卡資訊**，詳細日報內容已略過 🤫）"
+        return f"👌 收到！{reporter_name} ({date_str}) 的心得已成功登入檔案。\n\n（今天有乖，給你一個隱形貼紙 ⭐）"
         
     except Exception as e:
         print(f"LOG REPORT DB ERROR: {e}", file=sys.stderr)
@@ -246,10 +244,7 @@ def get_help_message():
         "▸ 指令 (或 幫助, help)\n"
         "功能：顯示此列表。\n"
         "▸ 測試排程 (或 發送提醒測試)\n"
-        "功能：手動測試排程提醒功能。\n\n"
-        "--- [ 注意事項 ] ---\n"
-        "1. 日期後面的(星期幾)是可選的，Bot會自動忽略它。\n"
-        "2. 所有回覆人名的地方，我都已經幫你移除了多餘的空格囉！🎉"
+        "功能：手動測試排程提醒功能。\n"
     )
 
 # --- LINE Bot Webhook 處理 (ID 修正已保留) ---
@@ -288,11 +283,10 @@ def handle_message(event):
         return
 
     # 1. 將全形括號替換為半形，以便 Regex 處理，並清除首尾空白
-    # 針對指令比對，使用處理過的文字
     text_processed = text.strip().replace('（', '(').replace('）', ')')
     reply_text = None
     
-    # --- 處理幫助與測試指令 (仍使用處理後的文字) ---
+    # --- 處理幫助與測試指令 ---
     if text_processed in ["指令", "幫助", "help"]:
         reply_text = get_help_message()
 
@@ -334,7 +328,7 @@ def handle_message(event):
                 # 記錄回報 (人名遺失)
                 reply_text = "⚠️ 日期後面請記得加上人名，不然我不知道誰交的啊！\n\n（你總不會想讓我自己猜吧？）"
             else:
-                # 呼叫 log_report，不傳遞完整的日報內容 (text)
+                # 呼叫 log_report，只記錄打卡資訊
                 reply_text = log_report(group_id, report_date, reporter_name)
             
         except ValueError:
