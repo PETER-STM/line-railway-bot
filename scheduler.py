@@ -3,7 +3,6 @@ import sys
 import re
 # 移除對 time 和 schedule 的依賴
 from datetime import datetime, timedelta
-# import schedule # <--- 移除
 import psycopg2
 
 # 引入 LINE Bot 相關
@@ -36,7 +35,6 @@ if not LINE_CHANNEL_ACCESS_TOKEN or not DATABASE_URL:
     # 這是 cron job 執行時的重要訊息
     print("FATAL ERROR: Missing required environment variables (LINE_CHANNEL_ACCESS_TOKEN or DATABASE_URL). Script exiting.", file=sys.stderr)
     line_bot_api = None
-    # 這裡直接退出，避免後續程式碼執行
     sys.exit(1)
 else:
     try:
@@ -74,12 +72,7 @@ def check_and_send_reminders(days_ago):
 
     try:
         with conn.cursor() as cursor:
-            # 1. 取得所有需要提醒的群組 ID 及其 VIP 名單 (注意：這裡的資料庫查詢邏輯應該是從 reports 撈群組)
-            # 由於 app.py 使用 reports 和 vips 兩個表，而 scheduler.py 使用 group_vips，這裡為了簡潔，
-            # 假設您的資料庫有一個名為 group_vips 的 VIEW 或 TABLE 包含了 group_id 和 vip_list。
-            # 為了和 app.py 的資料模型匹配 (vips 表)，我們應該改用 vips 表來獲取群組和 VIP。
-            
-            # (A) 查詢所有有 VIP 的群組 ID
+            # (A) 查詢所有有 VIP 的群組 ID (使用 vips 表，與 app.py 保持一致)
             cursor.execute("SELECT DISTINCT group_id FROM vips;")
             group_ids = [row[0] for row in cursor.fetchall()]
             
@@ -99,22 +92,18 @@ def check_and_send_reminders(days_ago):
                     print(f"Skipping excluded group: {group_id}", file=sys.stderr)
                     continue
 
-                # (B) 獲取該群組所有 VIP 名單
+                # (B) 獲取該群組所有 VIP 名單 (vip_name 欄位現已儲存正規化後的名稱)
                 cursor.execute(
                     "SELECT vip_name FROM vips WHERE group_id = %s;",
                     (group_id,)
                 )
-                # 這裡不再需要 normalize_name，因為它只在 log_report 和 scheduler 內部做比對。
-                # VIP 名單應存儲正規化後的名稱。
                 unique_normalized_vips = set(row[0] for row in cursor.fetchall())
                 
                 if not unique_normalized_vips:
                     print(f"Group {group_id} has no VIPs set. Skipping.", file=sys.stderr)
                     continue
 
-                # (C) 取得目標日期該群組已提交心得的人名
-                # 注意：reports 表中的 reporter_name 應儲存未正規化的名稱，但因為 log_report 允許非正規化名稱，
-                # 因此這裡必須使用正規化後的名稱進行比對。
+                # (C) 取得目標日期該群組已提交心得的人名，並進行正規化
                 cursor.execute(
                     "SELECT DISTINCT reporter_name FROM reports WHERE group_id = %s AND report_date = %s;",
                     (group_id, target_date)

@@ -8,6 +8,19 @@ from linebot.exceptions import InvalidSignatureError, LineBotApiError, LineBotAp
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, SourceGroup, SourceRoom, SourceUser
 import psycopg2
 
+# --- 姓名正規化工具 (用於確保 VIP 記錄唯一性，並解決重複名稱問題) ---
+def normalize_name(name):
+    """
+    對人名進行正規化處理，主要移除開頭的班級或編號標記。
+    例如: "(三) 浣熊🦝" -> "浣熊🦝"
+    """
+    # 移除開頭被括號 (圓括號、全形括號、方括號、書名號) 包裹的內容，例如 (三), (二), 【1】, [A]
+    # 匹配模式: ^(起始) + 任意空白 + 括號開頭 + 非括號內容(1到10個) + 括號結尾 + 任意空白
+    normalized = re.sub(r'^\s*[\(（\[【][^()\\[\]]{1,10}[\)）\]】]\s*', '', name).strip()
+    
+    # 如果正規化結果為空，返回原始名稱
+    return normalized if normalized else name
+
 # --- 環境變數設定 ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
@@ -46,28 +59,35 @@ def log_report(group_id, report_date, reporter_name):
     if not conn:
         return "❌ 資料庫連線失敗，請稍後再試。"
 
+    # 對 incoming name 進行正規化，以便比對 VIP 名單和檢查重複提交
+    normalized_reporter_name = normalize_name(reporter_name)
+
     try:
         with conn.cursor() as cursor:
-            # 1. 檢查是否為 VIP 成員
+            # 1. 檢查是否為 VIP 成員 (VIP 名單 now stores normalized names)
             cursor.execute(
                 "SELECT COUNT(*) FROM vips WHERE group_id = %s AND vip_name = %s;",
-                (group_id, reporter_name)
+                (group_id, normalized_reporter_name)
             )
             is_vip = cursor.fetchone()[0] > 0
             
             if not is_vip:
+                # 注意：這裡回覆時使用原始名稱，避免使用者困惑
                 return f"⚠️ 咦？「{reporter_name}」不是本群組的 VIP 成員喔！\n\n請先用「!VIP 姓名」指令將他/她加入 VIP 名單。"
 
-            # 2. 檢查是否重複打卡
+            # 2. 檢查是否重複打卡 (使用正規化名稱來確認該人是否已交)
             cursor.execute(
-                "SELECT COUNT(*) FROM reports WHERE group_id = %s AND report_date = %s AND reporter_name = %s;",
-                (group_id, report_date, reporter_name)
+                "SELECT reporter_name FROM reports WHERE group_id = %s AND report_date = %s;",
+                (group_id, report_date)
             )
-            if cursor.fetchone()[0] > 0:
+            submitted_names = {row[0] for row in cursor.fetchall()}
+            submitted_normalized_names = {normalize_name(name) for name in submitted_names}
+
+            if normalized_reporter_name in submitted_normalized_names:
                 # 重複打卡回覆模板
                 return f"👀 你確定你不是在鬧？「{reporter_name}」在 {report_date.strftime('%Y/%m/%d')} 已經交過心得啦！\n\n別偷懶，去交新的！"
-
-            # 3. 執行打卡記錄
+            
+            # 3. 執行打卡記錄 (reports 表儲存原始名稱，以利追溯)
             cursor.execute(
                 "INSERT INTO reports (group_id, report_date, reporter_name) VALUES (%s, %s, %s);",
                 (group_id, report_date, reporter_name)
@@ -85,28 +105,32 @@ def log_report(group_id, report_date, reporter_name):
         if conn: conn.close()
 
 def log_vip(group_id, vip_name):
-    """將新的 VIP 成員記錄到資料庫"""
+    """將新的 VIP 成員記錄到資料庫 (使用正規化後的名稱)"""
     conn = get_db_connection()
     if not conn:
         return "❌ 資料庫連線失敗，請稍後再試。"
 
+    # 對輸入名稱進行正規化，並以正規化後的名稱作為資料庫記錄的唯一識別
+    normalized_vip_name = normalize_name(vip_name)
+
     try:
         with conn.cursor() as cursor:
-            # 檢查是否已存在
+            # 檢查是否已存在 (使用正規化後的名稱檢查)
             cursor.execute(
                 "SELECT COUNT(*) FROM vips WHERE group_id = %s AND vip_name = %s;",
-                (group_id, vip_name)
+                (group_id, normalized_vip_name)
             )
             if cursor.fetchone()[0] > 0:
-                return f"💡 「{vip_name}」已經是本群組的 VIP 啦！不用重複加入喔。"
+                # 回覆時使用正規化後的名稱，因為這是資料庫中的儲存名稱
+                return f"💡 「{normalized_vip_name}」已經是本群組的 VIP 啦！不用重複加入喔。"
 
-            # 執行新增 VIP
+            # 執行新增 VIP (儲存正規化後的名稱)
             cursor.execute(
                 "INSERT INTO vips (group_id, vip_name) VALUES (%s, %s);",
-                (group_id, vip_name)
+                (group_id, normalized_vip_name)
             )
             conn.commit()
-            return f"🎉 恭喜！「{vip_name}」已成功加入 VIP 名單！\n\n歡迎進入心得分享的行列！"
+            return f"🎉 恭喜！「{normalized_vip_name}」已成功加入 VIP 名單！\n\n歡迎進入心得分享的行列！"
     except Exception as e:
         conn.rollback()
         print(f"DB log_vip ERROR: {e}", file=sys.stderr)
@@ -115,28 +139,32 @@ def log_vip(group_id, vip_name):
         if conn: conn.close()
 
 def remove_vip(group_id, vip_name):
-    """從資料庫中移除 VIP 成員"""
+    """從資料庫中移除 VIP 成員 (使用正規化後的名稱)"""
     conn = get_db_connection()
     if not conn:
         return "❌ 資料庫連線失敗，請稍後再試。"
+    
+    # 對輸入名稱進行正規化
+    normalized_vip_name = normalize_name(vip_name)
 
     try:
         with conn.cursor() as cursor:
-            # 檢查是否仍存在
+            # 檢查是否仍存在 (使用正規化後的名稱檢查)
             cursor.execute(
                 "SELECT COUNT(*) FROM vips WHERE group_id = %s AND vip_name = %s;",
-                (group_id, vip_name)
+                (group_id, normalized_vip_name)
             )
             if cursor.fetchone()[0] == 0:
-                return f"💡 「{vip_name}」本來就不在本群組的 VIP 名單中喔。"
+                # 回覆時使用正規化後的名稱
+                return f"💡 「{normalized_vip_name}」本來就不在本群組的 VIP 名單中喔。"
 
-            # 執行移除 VIP
+            # 執行移除 VIP (使用正規化後的名稱)
             cursor.execute(
                 "DELETE FROM vips WHERE group_id = %s AND vip_name = %s;",
-                (group_id, vip_name)
+                (group_id, normalized_vip_name)
             )
             conn.commit()
-            return f"🗑️ 「{vip_name}」已從 VIP 名單中移除。\n\n感謝這位 VIP 過去的貢獻！"
+            return f"🗑️ 「{normalized_vip_name}」已從 VIP 名單中移除。\n\n感謝這位 VIP 過去的貢獻！"
     except Exception as e:
         conn.rollback()
         print(f"DB remove_vip ERROR: {e}", file=sys.stderr)
@@ -145,7 +173,7 @@ def remove_vip(group_id, vip_name):
         if conn: conn.close()
         
 def list_vips(group_id):
-    """列出群組的所有 VIP 成員"""
+    """列出群組的所有 VIP 成員 (資料庫中儲存的即為正規化後的名稱)"""
     conn = get_db_connection()
     if not conn:
         return "❌ 資料庫連線失敗，無法查詢。"
@@ -183,6 +211,7 @@ def list_reporters(group_id):
 
 @app.route("/", methods=['GET'])
 def home():
+    """健康檢查路由，回應 200 OK 確保服務持續運行"""
     return "Line Bot Reminder Service is Running!", 200
 
 @app.route("/callback", methods=['POST'])
@@ -282,9 +311,7 @@ def handle_message(event):
             )
         except LineBotApiError as e:
             # 如果 reply_message 失敗，嘗試 push_message (例如：超過 3 秒回覆期限)
-            # *** ERROR FIX HERE: The print statement was likely incomplete ***
             print(f"LINE API reply failed (e.g., reply window expired). Error: {e}", file=sys.stderr)
-            # Since reply failed, we just log the failure and don't try push to avoid spam.
 
 # --- 啟動 Flask 應用 ---
 if __name__ == "__main__":
