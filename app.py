@@ -49,7 +49,7 @@ def setup_database_tables():
 
     cur = conn.cursor()
     try:
-        # 確保表格存在 (這裡假設已經存在，但為了健壯性，可以再次執行檢查或創建)
+        # 確保表格存在
         cur.execute("""
             CREATE TABLE IF NOT EXISTS reporters (
                 group_id TEXT NOT NULL,
@@ -120,22 +120,47 @@ def add_reporter(group_id, reporter_name):
         if conn: conn.close()
 
 def delete_reporter(group_id, reporter_name):
-    """從名單中刪除成員"""
+    """
+    從名單中刪除成員。
+    新增邏輯：嘗試使用原始名稱、轉換全形括號後的名稱，以解決全形/半形匹配問題。
+    """
     conn = get_db_connection()
     if conn is None: return DB_ERROR_MSG
+    
+    # helper 函式：將半形括號轉換回全形
+    def to_full_width(name):
+        return name.replace('(', '（').replace(')', '）')
+
+    # Bot 收到指令時，reporter_name 已經被 app.py 轉換成半形括號了 (例如: (五)彼得)
+    # 我們需要嘗試刪除 (1) 半形版本 (2) 全形版本
+    names_to_delete = [reporter_name] 
+    
+    # 建立全形括號版本 (例如: （五）彼得)
+    full_width_name = to_full_width(reporter_name)
+    if full_width_name not in names_to_delete:
+        names_to_delete.append(full_width_name)
+        
+    deleted_count = 0
     try:
         cur = conn.cursor()
-        cur.execute(
-            "DELETE FROM reporters WHERE group_id = %s AND reporter_name = %s",
-            (group_id, reporter_name)
-        )
-        if cur.rowcount > 0:
+        
+        for name in names_to_delete:
+            # 嘗試刪除每個可能的名稱
+            cur.execute(
+                "DELETE FROM reporters WHERE group_id = %s AND reporter_name = %s",
+                (group_id, name)
+            )
+            deleted_count += cur.rowcount
+        
+        if deleted_count > 0:
             conn.commit()
             # 刪除人名 (成功)
-            return f"🗑️ {reporter_name} 已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
+            return f"🗑️ 已成功從名單中移除 {deleted_count} 筆紀錄。\n\n（你的指令終於制伏了那個帶括號的幽靈！👻）"
         else:
             # 刪除人名 (未找到)
+            # 這裡回傳半形版本，因為這是 Bot 內部使用的標準化格式
             return f"❓名單裡根本沒有 {reporter_name} 啊！\n\n是不是名字打錯，還是你其實不想他回報？"
+            
     except Exception as e:
         print(f"DELETE REPORTER DB ERROR: {e}", file=sys.stderr)
         return DB_ERROR_MSG
@@ -208,7 +233,7 @@ def log_report(group_id, report_date, reporter_name):
     finally:
         if conn: conn.close()
 
-# --- NEW: 手動測試提醒函式 (核心更新) ---
+# --- 手動測試提醒函式 ---
 
 def run_manual_reminder_test(group_id):
     """
@@ -348,27 +373,30 @@ def handle_message(event):
         return
 
     # 1. 將全形括號替換為半形，以便 Regex 處理，並清除首尾空白
+    # NOTE: 這裡會將 (五)彼得) 轉換為 (五)彼得)
     text_processed = text.strip().replace('（', '(').replace('）', ')')
     reply_text = None
     
-    # --- 處理幫助與測試指令 (NEW: 執行實際催繳邏輯) ---
+    # --- 處理幫助與測試指令 ---
     if text_processed in ["指令", "幫助", "help"]:
         reply_text = get_help_message()
 
     if text_processed in ["發送提醒測試", "測試排程"]:
         if reply_text is None:
-            # 呼叫新的手動測試函式，它會執行檢查並 push 訊息
             reply_text = run_manual_reminder_test(group_id)
         
     # 處理管理指令 (新增/刪除人名, 查詢名單)
     match_add = re.match(r"^新增人名[\s　]+(.+)$", text_processed)
     if match_add:
+        # 傳入的是半形括號的標準化名稱 (如果輸入有括號的話)
         reporter_name = match_add.group(1).strip()
         reply_text = add_reporter(group_id, reporter_name)
 
     match_delete = re.match(r"^刪除人名[\s　]+(.+)$", text_processed)
     if match_delete:
+        # 傳入的是半形括號的標準化名稱 (如果輸入有括號的話)
         reporter_name = match_delete.group(1).strip()
+        # **重點：delete_reporter 現在會同時嘗試刪除半形和全形括號版本**
         reply_text = delete_reporter(group_id, reporter_name)
 
     if text_processed in ["查詢名單", "查看人員", "名單", "list"]:
