@@ -119,11 +119,11 @@ def add_reporter(group_id, reporter_name):
         )
         if cur.rowcount > 0:
             conn.commit()
-            # 新增人名 (成功)
-            return f"🎉 好嘞～ **{reporter_name}** 已成功加入名單！\n\n（逃不掉了，祝他順利回報。）"
+            # 新增人名 (成功) - 移除粗體
+            return f"🎉 好嘞～ {reporter_name} 已成功加入名單！\n\n（逃不掉了，祝他順利回報。）"
         else:
-            # 新增人名 (重複)
-            return f"🤨 **{reporter_name}** 早就在名單裡面坐好坐滿了，\n\n你該不會…忘記上一次也加過吧？"
+            # 新增人名 (重複) - 移除粗體
+            return f"🤨 {reporter_name} 早就在名單裡面坐好坐滿了，\n\n你該不會…忘記上一次也加過吧？"
     except Exception as e:
         print(f"ADD REPORTER DB ERROR: {e}", file=sys.stderr)
         return DB_ERROR_MSG
@@ -142,11 +142,11 @@ def delete_reporter(group_id, reporter_name):
         )
         if cur.rowcount > 0:
             conn.commit()
-            # 刪除人名 (成功)
-            return f"🗑️ **{reporter_name}** 已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
+            # 刪除人名 (成功) - 移除粗體
+            return f"🗑️ {reporter_name} 已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
         else:
-            # 刪除人名 (未找到)
-            return f"❓名單裡根本沒有 **{reporter_name}** 啊！\n\n是不是名字打錯，還是你其實不想他回報？"
+            # 刪除人名 (未找到) - 移除粗體
+            return f"❓名單裡根本沒有 {reporter_name} 啊！\n\n是不是名字打錯，還是你其實不想他回報？"
     except Exception as e:
         print(f"DELETE REPORTER DB ERROR: {e}", file=sys.stderr)
         return DB_ERROR_MSG
@@ -193,8 +193,8 @@ def log_report(group_id, report_date, reporter_name):
             (group_id, report_date, reporter_name)
         )
         if cur.fetchone():
-            # 記錄回報 (重複記錄)
-            return f"⚠️ **{reporter_name}** ({date_str}) 今天已經回報過了！\n\n別想靠重複交作業刷存在感，我看的很清楚 👀"
+            # 記錄回報 (重複記錄) - 移除粗體
+            return f"⚠️ {reporter_name} ({date_str}) 今天已經回報過了！\n\n別想靠重複交作業刷存在感，我看的很清楚 👀"
             
         # 3. 執行記錄
         cur.execute(
@@ -208,8 +208,8 @@ def log_report(group_id, report_date, reporter_name):
         if "已經在名單上了" not in add_reporter_result and "已將" in add_reporter_result:
             print(f"INFO: Automatically added {reporter_name} to reporters list.", file=sys.stderr)
 
-        # 記錄回報 (成功)
-        return f"👌 收到！**{reporter_name}** ({date_str}) 的心得已成功登入檔案。\n\n（今天有乖，給你一個隱形貼紙 ⭐）"
+        # 記錄回報 (成功) - 移除粗體
+        return f"👌 收到！{reporter_name} ({date_str}) 的心得已成功登入檔案。\n\n（今天有乖，給你一個隱形貼紙 ⭐）"
         
     except Exception as e:
         print(f"LOG REPORT DB ERROR: {e}", file=sys.stderr)
