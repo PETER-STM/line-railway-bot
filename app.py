@@ -41,7 +41,7 @@ def get_db_connection():
 def setup_database_tables():
     """
     設定資料庫表格結構。
-    **強制**刪除並重建所有表格，以修復錯誤的欄位結構。
+    **強制**刪除並重建所有表格，確保 report_content 欄位存在。
     """
     conn = get_db_connection()
     if conn is None:
@@ -67,13 +67,14 @@ def setup_database_tables():
             );
         """)
 
-        # 2. reports (紀錄心得分享完成的歷史)
+        # 2. reports (紀錄心得分享完成的歷史 - 確保 report_content TEXT 欄位存在)
         cur.execute("""
             CREATE TABLE reports (
                 id SERIAL PRIMARY KEY,
                 group_id TEXT NOT NULL,
                 reporter_name TEXT NOT NULL,
                 report_date DATE NOT NULL,
+                report_content TEXT,
                 log_time TIMESTAMP WITHOUT TIME ZONE DEFAULT CURRENT_TIMESTAMP
             );
         """)
@@ -88,7 +89,6 @@ def setup_database_tables():
         """)
 
         conn.commit()
-        # 這是驗證修復成功的獨特訊息！
         print("★★★★ SUCCESS: Tables forcibly DROPPED and RECREATED with correct schema. ★★★★", file=sys.stderr)
 
     except Exception as e:
@@ -179,7 +179,7 @@ def get_reporter_list(group_id):
 
 def log_report(group_id, report_date, reporter_name):
     """
-    記錄心得分享回報。
+    記錄心得分享回報，只儲存簡單的打卡資訊。
     """
     conn = get_db_connection()
     if conn is None: return DB_ERROR_MSG
@@ -187,19 +187,22 @@ def log_report(group_id, report_date, reporter_name):
         cur = conn.cursor()
         date_str = report_date.strftime('%Y.%m.%d')
         
-        # 1. 檢查是否已記錄
+        # 1. 檢查是否已記錄 (防止重複打卡)
         cur.execute(
             "SELECT id FROM reports WHERE group_id = %s AND report_date = %s AND reporter_name = %s",
             (group_id, report_date, reporter_name)
         )
         if cur.fetchone():
-            # 記錄回報 (重複記錄) - 移除空格
+            # 記錄回報 (重複記錄)
             return f"⚠️{reporter_name}({date_str})今天已經回報過了！\n\n別想靠重複交作業刷存在感，我看的很清楚 👀"
             
-        # 3. 執行記錄
+        # 2. 準備簡化內容 for report_content (只記錄打卡，忽略詳細日報)
+        simple_content = f"打卡紀錄: {date_str} {reporter_name} (內容已省略)"
+        
+        # 3. 執行記錄 (使用 simple_content)
         cur.execute(
-            "INSERT INTO reports (group_id, reporter_name, report_date) VALUES (%s, %s, %s)",
-            (group_id, reporter_name, report_date)
+            "INSERT INTO reports (group_id, reporter_name, report_date, report_content) VALUES (%s, %s, %s, %s)",
+            (group_id, reporter_name, report_date, simple_content)
         )
         conn.commit()
         
@@ -208,8 +211,8 @@ def log_report(group_id, report_date, reporter_name):
         if "已經在名單上了" not in add_reporter_result and "已成功加入名單" in add_reporter_result:
             print(f"INFO: Automatically added {reporter_name} to reporters list.", file=sys.stderr)
 
-        # 記錄回報 (成功) - 移除空格
-        return f"👌 收到！{reporter_name}({date_str})的心得已成功登入檔案。\n\n（今天有乖，給你一個隱形貼紙 ⭐）"
+        # 記錄回報 (成功)
+        return f"👍 收到！{reporter_name}({date_str})的心得已成功登入檔案。\n\n（根據您的要求，**只儲存了打卡資訊**，詳細日報內容已略過 🤫）"
         
     except Exception as e:
         print(f"LOG REPORT DB ERROR: {e}", file=sys.stderr)
@@ -230,11 +233,11 @@ def get_help_message():
     """返回 Bot 的所有可用指令列表"""
     return (
         "🤖 心得分享 Bot 指令一覽 🤖\n\n"
-        "--- [ 日常回報 (支援日報內容) ] ---\n"
+        "--- [ 日常回報 (只記錄打卡) ] ---\n"
         "格式：YYYY.MM.DD [星期幾] 姓名\n"
         "範例：2025.12.31 Peter\n"
         "範例：2025.11.14(五)彼得\n"
-        "**注意：** 人名後的**所有換行內容都會被忽略**，只用於記錄回報。\n\n"
+        "**注意：** Bot 只會擷取日期和姓名作為打卡紀錄，**完整日報內容將不會被儲存**。\n\n"
         "--- [ 名單管理 ] ---\n"
         "▸ 新增人名 [姓名]\n"
         "▸ 刪除人名 [姓名]\n"
@@ -285,35 +288,36 @@ def handle_message(event):
         return
 
     # 1. 將全形括號替換為半形，以便 Regex 處理，並清除首尾空白
-    text_to_match = text.strip().replace('（', '(').replace('）', ')')
+    # 針對指令比對，使用處理過的文字
+    text_processed = text.strip().replace('（', '(').replace('）', ')')
     reply_text = None
     
-    # --- 處理幫助與測試指令 ---
-    if text_to_match in ["指令", "幫助", "help"]:
+    # --- 處理幫助與測試指令 (仍使用處理後的文字) ---
+    if text_processed in ["指令", "幫助", "help"]:
         reply_text = get_help_message()
 
-    if text_to_match in ["發送提醒測試", "測試排程"]:
+    if text_processed in ["發送提醒測試", "測試排程"]:
         if reply_text is None:
             reply_text = test_daily_reminder(group_id)
         
     # 處理管理指令 (新增/刪除人名, 查詢名單)
-    match_add = re.match(r"^新增人名[\s　]+(.+)$", text_to_match)
+    match_add = re.match(r"^新增人名[\s　]+(.+)$", text_processed)
     if match_add:
         reporter_name = match_add.group(1).strip()
         reply_text = add_reporter(group_id, reporter_name)
 
-    match_delete = re.match(r"^刪除人名[\s　]+(.+)$", text_to_match)
+    match_delete = re.match(r"^刪除人名[\s　]+(.+)$", text_processed)
     if match_delete:
         reporter_name = match_delete.group(1).strip()
         reply_text = delete_reporter(group_id, reporter_name)
 
-    if text_to_match in ["查詢名單", "查看人員", "名單", "list"]:
+    if text_processed in ["查詢名單", "查看人員", "名單", "list"]:
         reply_text = get_reporter_list(group_id)
 
     # 處理「YYYY.MM.DD [星期幾] [人名]」回報指令
-    # 修正後的 Regex：使用 [^\n]+ 確保人名只擷取到第一個換行符號前，忽略後續日報內容。
-    regex_pattern = r"^(\d{4}\.\d{2}\.\d{2})\s*(\(.*\))?\s*([^\n]+)$"
-    match_report = re.match(regex_pattern, text_to_match)
+    # Regex 僅用於擷取第一行的人名和日期
+    regex_pattern = r"^(\d{4}\.\d{2}\.\d{2})\s*(\(.*\))?\s*([^\n]+)"
+    match_report = re.match(regex_pattern, text) # 對原始 text 進行匹配
 
     if match_report:
         date_str = match_report.group(1)
@@ -327,13 +331,14 @@ def handle_message(event):
             
             # 確保人名不為空
             if not reporter_name:
-                # 記錄回報 (人名遺失) - 此處無人名變數，不變
+                # 記錄回報 (人名遺失)
                 reply_text = "⚠️ 日期後面請記得加上人名，不然我不知道誰交的啊！\n\n（你總不會想讓我自己猜吧？）"
             else:
+                # 呼叫 log_report，不傳遞完整的日報內容 (text)
                 reply_text = log_report(group_id, report_date, reporter_name)
             
         except ValueError:
-            # 記錄回報 (日期格式錯誤) - 此處無人名變數，不變
+            # 記錄回報 (日期格式錯誤)
             reply_text = "❌ 日期長得怪怪的。\n\n請用標準格式：YYYY.MM.DD 姓名\n\n（小數點不是你的自由發揮。）"
 
     # 發送回覆訊息
