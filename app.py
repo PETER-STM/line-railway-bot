@@ -26,260 +26,168 @@ app = Flask(__name__)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# --- 活潑・幽默・微毒舌 回覆模板 ---
-UNIVERSAL_ERROR_MSG = (
-    "💥 發生未知錯誤。\n\n"
-    "可能是宇宙磁場不順，或系統在叛逆。\n\n"
-    "稍後再試，或找管理員用愛感化它。"
-)
-
-# --- 姓名正規化工具 ---
-def normalize_name(name):
-    """
-    對人名進行正規化處理，主要移除開頭的班級或編號標記。
-    例如: "(三) 浣熊🦝" -> "浣熊🦝"
-    """
-    # 移除開頭被括號 (圓括號、全形括號、方括號、書名號) 包裹的內容，例如 (三), (二), 【1】, [A]
-    # 匹配模式: ^(起始) + 任意空白 + 括號開頭 + 非括號內容(1到10個) + 括號結尾 + 任意空白
-    normalized = re.sub(r'^\s*[\(（\[【][^()\[\]]{1,10}[\)）\]】]\s*', '', name).strip()
-    
-    # 如果正規化結果為空，返回原始名稱
-    return normalized if normalized else name
-
 # --- 資料庫連線函式 ---
 def get_db_connection():
     """建立資料庫連線"""
     conn = None
     try:
+        # 在連線時加入 sslmode='require' 以確保與 Railway 的 PostgreSQL 連線安全
         conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         return conn
     except Exception as e:
-        print(f"Database connection error: {e}", file=sys.stderr)
+        print(f"DB CONNECTION ERROR: {e}", file=sys.stderr)
         return None
 
-# --- 核心資料庫操作函式 ---
+# --- 資料庫操作函式 ---
 
-def add_reporter(group_id, name):
-    """將新回報者加入名單"""
+def log_report(group_id, report_date, reporter_name):
+    """將心得報告打卡記錄到資料庫，並檢查是否為 VIP 名單中的人"""
     conn = get_db_connection()
-    if not conn: return UNIVERSAL_ERROR_MSG # 使用通用錯誤模板
+    if not conn:
+        return "❌ 資料庫連線失敗，請稍後再試。"
 
-    cursor = conn.cursor()
     try:
-        # 檢查是否已存在 (使用儲存的原始名稱進行檢查，避免邏輯錯誤)
-        cursor.execute(
-            "SELECT 1 FROM reporters WHERE group_id = %s AND name = %s",
-            (group_id, name)
-        )
-        if cursor.fetchone():
-            # 新增人名 (重複) 模板
-            return (
-                f"🤨 {name} 早就在名單裡面坐好坐滿了，\n\n"
-                f"你該不會…忘記上一次也加過吧？"
+        with conn.cursor() as cursor:
+            # 1. 檢查是否為 VIP 成員
+            cursor.execute(
+                "SELECT COUNT(*) FROM vips WHERE group_id = %s AND vip_name = %s;",
+                (group_id, reporter_name)
             )
+            is_vip = cursor.fetchone()[0] > 0
+            
+            if not is_vip:
+                return f"⚠️ 咦？「{reporter_name}」不是本群組的 VIP 成員喔！\n\n請先用「!VIP 姓名」指令將他/她加入 VIP 名單。"
 
-        # 插入新回報者 (儲存的是使用者輸入的原始名稱)
-        cursor.execute(
-            "INSERT INTO reporters (group_id, name) VALUES (%s, %s)",
-            (group_id, name)
-        )
-        conn.commit()
-        # 新增人名 (成功) 模板
-        return f"🎉 好嘞～ {name} 已成功加入名單！\n\n（逃不掉了，祝他順利回報。）"
+            # 2. 檢查是否重複打卡
+            cursor.execute(
+                "SELECT COUNT(*) FROM reports WHERE group_id = %s AND report_date = %s AND reporter_name = %s;",
+                (group_id, report_date, reporter_name)
+            )
+            if cursor.fetchone()[0] > 0:
+                # 重複打卡回覆模板
+                return f"👀 你確定你不是在鬧？「{reporter_name}」在 {report_date.strftime('%Y/%m/%d')} 已經交過心得啦！\n\n別偷懶，去交新的！"
+
+            # 3. 執行打卡記錄
+            cursor.execute(
+                "INSERT INTO reports (group_id, report_date, reporter_name) VALUES (%s, %s, %s);",
+                (group_id, report_date, reporter_name)
+            )
+            conn.commit()
+
+            # 成功打卡回覆模板
+            return f"✅ 打卡成功！\n\nVIP：{reporter_name}\n日期：{report_date.strftime('%Y/%m/%d')}\n\n系統已收錄您的心得，感謝您的分享！"
 
     except Exception as e:
-        print(f"DB Error (add_reporter): {e}", file=sys.stderr)
-        return UNIVERSAL_ERROR_MSG # 使用通用錯誤模板
+        conn.rollback()
+        print(f"DB log_report ERROR: {e}", file=sys.stderr)
+        return f"🚨 伺服器記錄時發生錯誤：{e}"
     finally:
-        cursor.close()
-        conn.close()
+        if conn: conn.close()
 
-def remove_reporter(group_id, name):
-    """從名單中移除回報者"""
+def log_vip(group_id, vip_name):
+    """將新的 VIP 成員記錄到資料庫"""
     conn = get_db_connection()
-    if not conn: return UNIVERSAL_ERROR_MSG # 使用通用錯誤模板
+    if not conn:
+        return "❌ 資料庫連線失敗，請稍後再試。"
 
-    cursor = conn.cursor()
     try:
-        # 刪除時必須使用使用者輸入的精確名稱 (這是目前系統的限制)
-        cursor.execute(
-            "DELETE FROM reporters WHERE group_id = %s AND name = %s",
-            (group_id, name)
-        )
-        if cursor.rowcount == 0:
-            # 刪除人名 (未找到) 模板
-            return (
-                f"❓名單裡根本沒有 {name} 啊！\n\n"
-                f"是不是名字打錯，還是你其實不想他回報？"
+        with conn.cursor() as cursor:
+            # 檢查是否已存在
+            cursor.execute(
+                "SELECT COUNT(*) FROM vips WHERE group_id = %s AND vip_name = %s;",
+                (group_id, vip_name)
             )
+            if cursor.fetchone()[0] > 0:
+                return f"💡 「{vip_name}」已經是本群組的 VIP 啦！不用重複加入喔。"
+
+            # 執行新增 VIP
+            cursor.execute(
+                "INSERT INTO vips (group_id, vip_name) VALUES (%s, %s);",
+                (group_id, vip_name)
+            )
+            conn.commit()
+            return f"🎉 恭喜！「{vip_name}」已成功加入 VIP 名單！\n\n歡迎進入心得分享的行列！"
+    except Exception as e:
+        conn.rollback()
+        print(f"DB log_vip ERROR: {e}", file=sys.stderr)
+        return f"🚨 伺服器記錄時發生錯誤：{e}"
+    finally:
+        if conn: conn.close()
+
+def remove_vip(group_id, vip_name):
+    """從資料庫中移除 VIP 成員"""
+    conn = get_db_connection()
+    if not conn:
+        return "❌ 資料庫連線失敗，請稍後再試。"
+
+    try:
+        with conn.cursor() as cursor:
+            # 檢查是否仍存在
+            cursor.execute(
+                "SELECT COUNT(*) FROM vips WHERE group_id = %s AND vip_name = %s;",
+                (group_id, vip_name)
+            )
+            if cursor.fetchone()[0] == 0:
+                return f"💡 「{vip_name}」本來就不在本群組的 VIP 名單中喔。"
+
+            # 執行移除 VIP
+            cursor.execute(
+                "DELETE FROM vips WHERE group_id = %s AND vip_name = %s;",
+                (group_id, vip_name)
+            )
+            conn.commit()
+            return f"🗑️ 「{vip_name}」已從 VIP 名單中移除。\n\n感謝這位 VIP 過去的貢獻！"
+    except Exception as e:
+        conn.rollback()
+        print(f"DB remove_vip ERROR: {e}", file=sys.stderr)
+        return f"🚨 伺服器移除時發生錯誤：{e}"
+    finally:
+        if conn: conn.close()
         
-        conn.commit()
-        # 刪除人名 (成功) 模板
-        return f"🗑️ {name} 已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
+def list_vips(group_id):
+    """列出群組的所有 VIP 成員"""
+    conn = get_db_connection()
+    if not conn:
+        return "❌ 資料庫連線失敗，無法查詢。"
+    
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT vip_name FROM vips WHERE group_id = %s ORDER BY vip_name;",
+                (group_id,)
+            )
+            vips = [row[0] for row in cursor.fetchall()]
+            
+            if not vips:
+                return "📌 本群組目前沒有任何 VIP 成員！\n\n快使用「!VIP 姓名」來加入第一個 VIP 吧！"
+            
+            vip_list = "\n".join([f"- {name}" for name in vips])
+            return f"👑 本群組的 VIP 成員名單 👑\n\n{vip_list}\n\n(總人數: {len(vips)})"
+    except Exception as e:
+        print(f"DB list_vips ERROR: {e}", file=sys.stderr)
+        return f"🚨 伺服器查詢時發生錯誤：{e}"
+    finally:
+        if conn: conn.close()
 
 def list_reporters(group_id):
-    """查詢回報者名單 (會將同名但帶有前綴的名稱合併顯示)"""
-    conn = get_db_connection()
-    if not conn: return UNIVERSAL_ERROR_MSG # 使用通用錯誤模板
-    
-    cursor = conn.cursor()
-    try:
-        # 1. 取得所有儲存的原始名稱
-        cursor.execute(
-            "SELECT name FROM reporters WHERE group_id = %s ORDER BY name",
-            (group_id,)
-        )
-        original_names = [row[0] for row in cursor.fetchall()]
+    """
+    列出所有 VIP 在最近 N 天（例如 7 天）內的打卡記錄，
+    並顯示在指定日期 (通常是昨天) 誰未交心得。
+    """
+    # 這裡的邏輯比較複雜，主要是檢查前一天的完成情況
+    # 因為這個功能主要由排程腳本 `scheduler.py` 處理，
+    # 為了簡潔，我們只讓這個指令列出 VIP 名單
+    return list_vips(group_id)
 
-        if not original_names:
-            # 查詢名單 (無成員) 模板
-            return "📭 名單空空如也～\n\n快用 新增人名 [姓名] 把第一位勇者召喚進來吧！"
-        
-        # 2. 進行正規化並取得唯一的名稱集合
-        # 這裡會將 (三)浣熊🦝, (二)浣熊🦝, 浣熊🦝 全部正規化為 '浣熊🦝'
-        unique_normalized_names = set()
-        for name in original_names:
-            unique_normalized_names.add(normalize_name(name))
+# --- Flask 路由與 LINE Webhook 處理 ---
 
-        # 3. 排序後用於顯示
-        list_of_names = "\n".join(sorted(unique_normalized_names))
-        
-        # 查詢名單 (有成員) 模板
-        return (
-            f"📋 最新回報觀察名單如下：\n"
-            f"{list_of_names}\n\n"
-            f"（嗯，看起來大家都還活著。）"
-        )
-    except Exception as e:
-        print(f"DB Error (list_reporters): {e}", file=sys.stderr)
-        return UNIVERSAL_ERROR_MSG # 使用通用錯誤模板
-    finally:
-        cursor.close()
-        conn.close()
-
-def log_report(group_id, date, reporter_name):
-    """記錄每日心得打卡 (使用正規化名稱進行匹配檢查)"""
-    conn = get_db_connection()
-    if not conn: return UNIVERSAL_ERROR_MSG # 使用通用錯誤模板
-    
-    cursor = conn.cursor()
-    try:
-        # 1. 檢查回報者是否在名單上 (使用正規化後的名稱進行匹配檢查)
-        
-        # 正規化使用者輸入的打卡名稱
-        normalized_input_name = normalize_name(reporter_name)
-
-        # 查詢資料庫中所有回報者名單
-        cursor.execute(
-            "SELECT name FROM reporters WHERE group_id = %s",
-            (group_id,)
-        )
-        
-        # 找到所有儲存在資料庫中，但正規化後與使用者輸入的名稱相符的原始名稱
-        valid_reporter_names = [
-            stored_name for (stored_name,) in cursor.fetchall()
-            if normalize_name(stored_name) == normalized_input_name
-        ]
-
-        if not valid_reporter_names:
-            # 記錄回報 (人名不在名單) - 使用舊有邏輯但調整語氣
-            return f"⚠️ {reporter_name} 不在觀察名單上！\n\n（請先輸入「新增人名 {reporter_name}」加入，不然我不能幫你記錄喔。）"
-
-        # 2. 決定要使用哪個名稱進行記錄 (為了系統兼容性，我們使用使用者輸入的名稱)
-        name_to_log = reporter_name 
-        
-        # 檢查是否重複回報 (使用使用者輸入的名稱進行檢查)
-        cursor.execute(
-            "SELECT 1 FROM daily_reports WHERE group_id = %s AND report_date = %s AND reporter_name = %s",
-            (group_id, date, name_to_log)
-        )
-        if cursor.fetchone():
-            # 記錄回報 (重複記錄) 模板
-            return f"⚠️ {name_to_log} ({date}) 今天已經回報過了！\n\n別想靠重複交作業刷存在感，我看的很清楚 👀"
-
-        # 3. 記錄回報 (使用使用者輸入的名稱進行記錄)
-        cursor.execute(
-            "INSERT INTO daily_reports (group_id, report_date, reporter_name) VALUES (%s, %s, %s)",
-            (group_id, date, name_to_log)
-        )
-        conn.commit()
-        # 記錄回報 (成功) 模板
-        return (
-            f"👌 收到！{name_to_log} ({date}) 的心得已成功登入檔案。\n\n"
-            f"（今天有乖，給你一個隱形貼紙 ⭐）"
-        )
-
-    except Exception as e:
-        print(f"DB Error (log_report): {e}", file=sys.stderr)
-        return UNIVERSAL_ERROR_MSG # 使用通用錯誤模板
-    finally:
-        cursor.close()
-        conn.close()
-
-# --- 資料庫初始化 (僅在應用程式啟動時執行一次) ---
-def init_db():
-    conn = get_db_connection()
-    if not conn: 
-        print("Database initialization failed: No connection.", file=sys.stderr)
-        return
-    
-    cursor = conn.cursor()
-    try:
-        # 建立 reporters 表 (回報者名單)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS reporters (
-                id SERIAL PRIMARY KEY,
-                group_id TEXT NOT NULL,
-                name TEXT NOT NULL,
-                UNIQUE (group_id, name)
-            );
-        """)
-        # 建立 daily_reports 表 (每日打卡記錄)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS daily_reports (
-                id SERIAL PRIMARY KEY,
-                group_id TEXT NOT NULL,
-                report_date DATE NOT NULL,
-                reporter_name TEXT NOT NULL,
-                reported_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE (group_id, report_date, reporter_name)
-            );
-        """)
-        conn.commit()
-        print("Database initialized successfully (tables checked/created).", file=sys.stderr)
-    except Exception as e:
-        print(f"Database initialization error: {e}", file=sys.stderr)
-    finally:
-        cursor.close()
-        conn.close()
-
-# 應用程式啟動時執行資料庫初始化
-init_db()
-
-# --- 命令偵測正規表達式 ---
-
-# 偵測心得分享的正規表達式 (日期 [可選的星期幾] 姓名 內容)
-# Group 1: 日期 (e.g., 2025.11.18)
-# Group 2: 人名 (name) 
-# Group 3: 內容 (content)
-REPORT_REGEX = re.compile(r'^(\d{4}\.\d{2}\.\d{2})\s*(?:\([一二三四五六日]\))?\s*(.+?)\s*([\s\S]+)$', re.MULTILINE)
-
-# 偵測新增人名的正規表達式 (已移除前綴)
-ADD_REGEX = re.compile(r'^新增人名\s*(.+)$')
-
-# 偵測移除人名的正規表達式 (已移除前綴)
-REMOVE_REGEX = re.compile(r'^移除人名\s*(.+)$')
-
-# 偵測查詢名單的正規表達式 (已移除前綴)
-LIST_REGEX = re.compile(r'^查詢名單$')
-
-# NEW: 偵測測試排程指令
-TEST_SCHEDULE_REGEX = re.compile(r'^測試排程$')
-
-# --- LINE Webhook 處理 ---
+@app.route("/", methods=['GET'])
+def home():
+    return "Line Bot Reminder Service is Running!", 200
 
 @app.route("/callback", methods=['POST'])
 def callback():
+    """LINE 平台呼叫的 Webhook 接口"""
     signature = request.headers['X-Line-Signature']
     body = request.get_data(as_text=True)
     app.logger.info("Request body: " + body)
@@ -290,79 +198,66 @@ def callback():
         print("Invalid signature. Please check your channel access token/secret.", file=sys.stderr)
         abort(400)
     except Exception as e:
-        print(f"Error handling webhook: {e}", file=sys.stderr)
+        print(f"Webhook handling error: {e}", file=sys.stderr)
         abort(500)
 
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    text = event.message.text.strip()
-    reply_text = None
-
-    # 必須在群組或聊天室內才能追蹤
-    if not isinstance(event.source, (SourceGroup, SourceRoom)):
-        reply_text = "請將我加入群組或聊天室才能開始追蹤心得分享喔！"
-        try:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-        except LineBotApiError as e:
-             print(f"LINE API REPLY ERROR: {e}", file=sys.stderr)
+    """處理接收到的訊息"""
+    # 確保訊息來自群組或房間
+    if not (isinstance(event.source, SourceGroup) or isinstance(event.source, SourceRoom)):
+        if isinstance(event.source, SourceUser):
+            # 私訊回覆模板
+            reply_text = "👋 嗨！我是心得分享催繳小幫手！\n\n但我只為群組/房間服務喔，請把我加到您的群組中！"
+            try:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+            except LineBotApiError as e:
+                print(f"LINE API reply failed for user: {e}", file=sys.stderr)
         return
 
-    # 取得群組 ID
+    # 取得群組或房間 ID
+    group_id = None
     if isinstance(event.source, SourceGroup):
         group_id = event.source.group_id
     elif isinstance(event.source, SourceRoom):
         group_id = event.source.room_id
-    else:
-        # 理論上不會發生，但作為防護
+    
+    # 如果群組 ID 在排除列表中，則忽略
+    if group_id in EXCLUDE_GROUP_IDS:
         return
+        
+    text = event.message.text.strip()
+    reply_text = None
     
-    # --- 1. 處理控制指令 (已移除「施恩澤」前綴) ---
+    # 1. 處理 VIP 相關指令
+    match_vip_add = re.match(r"^!VIP\s+(.+)$", text, re.IGNORECASE)
+    match_vip_remove = re.match(r"^!RMVIP\s+(.+)$", text, re.IGNORECASE)
     
-    # 偵測新增人名指令: 新增人名 姓名
-    match_add = ADD_REGEX.match(text)
-    if match_add:
-        name_to_add = match_add.group(1).strip()
-        if name_to_add:
-            reply_text = add_reporter(group_id, name_to_add)
-        else:
-            reply_text = "⚠️ 請提供要新增的人名，格式：新增人名 [姓名]"
-
-    # 偵測移除人名指令: 移除人名 姓名
-    match_remove = REMOVE_REGEX.match(text)
-    if match_remove:
-        name_to_remove = match_remove.group(1).strip()
-        if name_to_remove:
-            reply_text = remove_reporter(group_id, name_to_remove)
-        else:
-            reply_text = "⚠️ 請提供要移除的人名，格式：移除人名 [姓名]"
-
-    # 偵測查詢名單指令: 查詢名單
-    match_list = LIST_REGEX.match(text)
-    if match_list:
-        reply_text = list_reporters(group_id)
-
-    # NEW: 偵測測試排程指令: 測試排程
-    match_test_schedule = TEST_SCHEDULE_REGEX.match(text)
-    if match_test_schedule:
-        if group_id in EXCLUDE_GROUP_IDS:
-            # 測試排程 (已排除群組) 模板
-            reply_text = "🚫 這個群組在「排除名單」裡，\n\n排程器看到這邊會自動裝死，不會發任何提醒。"
-        else:
-            # 測試排程 (正常群組) 模板
-            reply_text = "🔔 測試指令 OK！\n\n請坐等排程器在設定時間跳出來嚇你，\n\n以確認系統正常運作。"
-
-
-    # --- 2. 處理心得分享 (打卡) ---
+    if match_vip_add:
+        vip_name = match_vip_add.group(1).strip()
+        reply_text = log_vip(group_id, vip_name)
+        
+    elif match_vip_remove:
+        vip_name = match_vip_remove.group(1).strip()
+        reply_text = remove_vip(group_id, vip_name)
+        
+    elif re.match(r"^!LIST\s*VIP$", text, re.IGNORECASE) or re.match(r"^!VIP\s*LIST$", text, re.IGNORECASE):
+        reply_text = list_vips(group_id)
+        
+    # 2. 處理報告/打卡指令
+    # 格式：YYYY.MM.DD 姓名 (或 YYYY/MM/DD 姓名)
+    # 正則表達式： (\d{4}[./]\d{2}[./]\d{2})\s+(.+)
+    match_report = re.match(r"^(\d{4}[./]\d{2}[./]\d{2})\s+(.+)$", text)
     
-    # 偵測心得分享格式: YYYY.MM.DD 姓名 內容...
-    match_report = REPORT_REGEX.match(text)
-    if match_report and not reply_text: # 如果沒有命中前面的控制指令，才檢查心得
+    if match_report:
         date_str = match_report.group(1) # 日期是第一個捕獲組
         name_str = match_report.group(2).strip() # 人名是第二個捕獲組
 
         try:
+            # 轉換分隔符號為點號，以便統一解析
+            date_str = date_str.replace('/', '.') 
             report_date = datetime.strptime(date_str, '%Y.%m.%d').date()
             reporter_name = name_str
             
@@ -387,16 +282,10 @@ def handle_message(event):
             )
         except LineBotApiError as e:
             # 如果 reply_message 失敗，嘗試 push_message (例如：超過 3 秒回覆期限)
-            print(f"LINE API REPLY ERROR: {e}. Trying push message...", file=sys.stderr)
-            try:
-                # Fallback to push_message
-                line_bot_api.push_message(
-                    group_id,
-                    TextSendMessage(text=reply_text)
-                )
-            except LineBotApiError as push_e:
-                print(f"LINE API PUSH ERROR: {push_e}", file=sys.stderr)
-                
-# --- Flask 啟動 ---
+            # *** ERROR FIX HERE: The print statement was likely incomplete ***
+            print(f"LINE API reply failed (e.g., reply window expired). Error: {e}", file=sys.stderr)
+            # Since reply failed, we just log the failure and don't try push to avoid spam.
+
+# --- 啟動 Flask 應用 ---
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host='0.0.0.0', port=os.environ.get('PORT', 8080))
