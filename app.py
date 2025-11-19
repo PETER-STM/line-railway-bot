@@ -119,11 +119,11 @@ def add_reporter(group_id, reporter_name):
         )
         if cur.rowcount > 0:
             conn.commit()
-            # 新增人名 (成功) - 移除粗體
-            return f"🎉 好嘞～ {reporter_name} 已成功加入名單！\n\n（逃不掉了，祝他順利回報。）"
+            # 新增人名 (成功) - 移除空格
+            return f"🎉 好嘞～{reporter_name}已成功加入名單！\n\n（逃不掉了，祝他順利回報。）"
         else:
-            # 新增人名 (重複) - 移除粗體
-            return f"🤨 {reporter_name} 早就在名單裡面坐好坐滿了，\n\n你該不會…忘記上一次也加過吧？"
+            # 新增人名 (重複) - 移除空格
+            return f"🤨{reporter_name}早就在名單裡面坐好坐滿了，\n\n你該不會…忘記上一次也加過吧？"
     except Exception as e:
         print(f"ADD REPORTER DB ERROR: {e}", file=sys.stderr)
         return DB_ERROR_MSG
@@ -142,11 +142,11 @@ def delete_reporter(group_id, reporter_name):
         )
         if cur.rowcount > 0:
             conn.commit()
-            # 刪除人名 (成功) - 移除粗體
-            return f"🗑️ {reporter_name} 已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
+            # 刪除人名 (成功) - 移除空格
+            return f"🗑️{reporter_name}已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
         else:
-            # 刪除人名 (未找到) - 移除粗體
-            return f"❓名單裡根本沒有 {reporter_name} 啊！\n\n是不是名字打錯，還是你其實不想他回報？"
+            # 刪除人名 (未找到) - 移除空格
+            return f"❓名單裡根本沒有{reporter_name}啊！\n\n是不是名字打錯，還是你其實不想他回報？"
     except Exception as e:
         print(f"DELETE REPORTER DB ERROR: {e}", file=sys.stderr)
         return DB_ERROR_MSG
@@ -166,7 +166,7 @@ def get_reporter_list(group_id):
         reporters = [row[0] for row in cur.fetchall()]
         if reporters:
             # 查詢名單 (有成員)
-            list_str = "\n" + "\n".join(reporters) # 移除前面的 "- " 以符合模板
+            list_str = "\n" + "\n".join(reporters) # 準備成員列表
             return f"📋 最新回報觀察名單如下：{list_str}\n\n（嗯，看起來大家都還活著。）"
         else:
             # 查詢名單 (無成員)
@@ -193,8 +193,8 @@ def log_report(group_id, report_date, reporter_name):
             (group_id, report_date, reporter_name)
         )
         if cur.fetchone():
-            # 記錄回報 (重複記錄) - 移除粗體
-            return f"⚠️ {reporter_name} ({date_str}) 今天已經回報過了！\n\n別想靠重複交作業刷存在感，我看的很清楚 👀"
+            # 記錄回報 (重複記錄) - 移除空格
+            return f"⚠️{reporter_name}({date_str})今天已經回報過了！\n\n別想靠重複交作業刷存在感，我看的很清楚 👀"
             
         # 3. 執行記錄
         cur.execute(
@@ -205,11 +205,11 @@ def log_report(group_id, report_date, reporter_name):
         
         # 自動將人名加入名單（如果不在）
         add_reporter_result = add_reporter(group_id, reporter_name)
-        if "已經在名單上了" not in add_reporter_result and "已將" in add_reporter_result:
+        if "已經在名單上了" not in add_reporter_result and "已成功加入名單" in add_reporter_result:
             print(f"INFO: Automatically added {reporter_name} to reporters list.", file=sys.stderr)
 
-        # 記錄回報 (成功) - 移除粗體
-        return f"👌 收到！{reporter_name} ({date_str}) 的心得已成功登入檔案。\n\n（今天有乖，給你一個隱形貼紙 ⭐）"
+        # 記錄回報 (成功) - 移除空格
+        return f"👌 收到！{reporter_name}({date_str})的心得已成功登入檔案。\n\n（今天有乖，給你一個隱形貼紙 ⭐）"
         
     except Exception as e:
         print(f"LOG REPORT DB ERROR: {e}", file=sys.stderr)
@@ -298,13 +298,13 @@ def handle_message(event):
             
             # 確保人名不為空
             if not reporter_name:
-                # 記錄回報 (人名遺失)
+                # 記錄回報 (人名遺失) - 此處無人名變數，不變
                 reply_text = "⚠️ 日期後面請記得加上人名，不然我不知道誰交的啊！\n\n（你總不會想讓我自己猜吧？）"
             else:
                 reply_text = log_report(group_id, report_date, reporter_name)
             
         except ValueError:
-            # 記錄回報 (日期格式錯誤)
+            # 記錄回報 (日期格式錯誤) - 此處無人名變數，不變
             reply_text = "❌ 日期長得怪怪的。\n\n請用標準格式：YYYY.MM.DD 姓名\n\n（小數點不是你的自由發揮。）"
 
     # 發送回覆訊息
