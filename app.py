@@ -10,7 +10,7 @@ import psycopg2
 # 引入 Google Gemini (如果 GOOGLE_API_KEY 有設置)
 import google.generativeai as genai 
 
-# --- 姓名正規化工具 (用於確保 VIP 記錄唯一性
+# --- 姓名正規化工具 (用於確保 VIP 記錄唯一性) ---
 def normalize_name(name):
     """
     對人名進行正規化處理，主要移除開頭的班級或編號標記。
@@ -43,7 +43,7 @@ if GOOGLE_API_KEY:
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
         model = genai.GenerativeModel('gemini-1.5-flash')
-        # print("INFO: Gemini AI model initialized successfully.", file=sys.stderr) # 部署日誌會顯示
+        # print("INFO: Gemini AI model initialized successfully.", file=sys.stderr) 
     except Exception as e:
         print(f"WARNING: Failed to initialize Gemini AI: {e}", file=sys.stderr)
 else:
@@ -71,7 +71,7 @@ def get_db_connection():
         print(f"Database connection error: {e}", file=sys.stderr)
         return None
 
-# --- 資料庫初始化 (修正後，確保所有表被創建) ---
+# --- 資料庫初始化 (最終修正版，強制 DROP 舊表結構) ---
 def ensure_tables_exist():
     conn = get_db_connection()
     if conn is None: 
@@ -80,9 +80,16 @@ def ensure_tables_exist():
 
     try:
         with conn.cursor() as cur:
+            # 🚨 關鍵修正：強制刪除舊結構的資料表，以確保後續的 CREATE 語句能創建正確的結構。
+            # 這能徹底解決「column "key" of relation "settings" does not exist」的問題
+            cur.execute("DROP TABLE IF EXISTS settings CASCADE;")
+            cur.execute("DROP TABLE IF EXISTS group_modes CASCADE;")
+            cur.execute("DROP TABLE IF EXISTS group_vips CASCADE;")
+            cur.execute("DROP TABLE IF EXISTS reports CASCADE;")
+
             # 1. VIP 名單表
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS group_vips (
+                CREATE TABLE group_vips (
                     group_id TEXT NOT NULL, 
                     vip_name TEXT NOT NULL,
                     normalized_vip_name TEXT NOT NULL, 
@@ -91,7 +98,7 @@ def ensure_tables_exist():
             """)
             # 2. 回報紀錄表
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS reports (
+                CREATE TABLE reports (
                     id SERIAL PRIMARY KEY, 
                     group_id TEXT NOT NULL,
                     report_date DATE NOT NULL,
@@ -103,20 +110,20 @@ def ensure_tables_exist():
             """)
             # 3. 系統設定表 (全域暫停)
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS settings (
+                CREATE TABLE settings (
                     key TEXT PRIMARY KEY, 
                     value TEXT NOT NULL
                 );
             """)
             # 4. 群組模式表 (AI 開關)
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS group_modes (
+                CREATE TABLE group_modes (
                     group_id TEXT PRIMARY KEY,
                     mode TEXT DEFAULT 'NORMAL' -- 'NORMAL' or 'AI'
                 );
             """)
             
-            # 初始化全域暫停狀態
+            # 初始化全域暫停狀態 (現在 settings 表是乾淨的，不會報錯)
             cur.execute("INSERT INTO settings (key, value) VALUES ('is_paused', 'false') ON CONFLICT DO NOTHING;")
             conn.commit()
             print("INFO: Database tables checked/created.", file=sys.stderr)
@@ -185,6 +192,7 @@ def remove_vip_from_group(group_id, name):
                 "DELETE FROM reports WHERE group_id = %s AND normalized_reporter_name = %s;",
                 (group_id, normalized_name_to_remove)
             )
+            cursor.rowcount # 確保 reports 表操作被執行
             conn.commit()
 
             if rows_deleted > 0:
@@ -217,8 +225,9 @@ def list_vips_in_group(group_id):
             unique_vips = {}
             for vip_name, normalized_name in cursor.fetchall():
                 # 如果這個正規化名稱還沒被記錄，或者當前的 vip_name 是一個更「乾淨」的版本
+                # 這裡的邏輯是確保同一個人的不同稱謂 (如：(三) 浣熊 / 浣熊) 只會顯示一次。
                 if normalized_name not in unique_vips or (
-                   normalized_name == vip_name and normalized_name != unique_vips[normalized_name]
+                   len(normalized_name) < len(unique_vips[normalized_name])
                 ):
                     unique_vips[normalized_name] = vip_name
             
@@ -293,7 +302,7 @@ def log_report(group_id, report_date, reporter_name):
         if conn: conn.close()
 
 
-# --- AI 相關函式 (保持不變) ---
+# --- AI/Settings 相關函式 ---
 def get_group_mode(group_id):
     conn = get_db_connection()
     if not conn: return 'NORMAL' 
@@ -303,10 +312,11 @@ def get_group_mode(group_id):
             res = cur.fetchone()
             return res[0] if res else 'NORMAL'
     except Exception as e:
+        # 這裡可能會因為 group_modes 不存在而報錯，返回預設值
         print(f"MODE GET ERROR: {e}", file=sys.stderr)
         return 'NORMAL'
     finally:
-        conn.close()
+        if conn: conn.close()
 
 def set_group_mode(group_id, mode):
     conn = get_db_connection()
@@ -324,7 +334,7 @@ def set_group_mode(group_id, mode):
         print(f"MODE SET ERROR: {e}", file=sys.stderr)
         return UNKNOWN_ERROR_TEXT
     finally:
-        conn.close()
+        if conn: conn.close()
 
 def generate_ai_reply(user_message):
     if not model: return None
@@ -345,12 +355,18 @@ def set_global_pause(state):
     if not conn: return UNKNOWN_ERROR_TEXT
     try:
         with conn.cursor() as cur:
+            # 檢查 settings 表格是否已經初始化
+            cur.execute("SELECT value FROM settings WHERE key = 'is_paused'")
+            if cur.fetchone() is None:
+                # 如果沒有，先插入預設值
+                cur.execute("INSERT INTO settings (key, value) VALUES ('is_paused', 'false') ON CONFLICT DO NOTHING;")
+            
             cur.execute("UPDATE settings SET value = %s WHERE key = 'is_paused'", (state,))
             conn.commit()
         status = "暫停" if state == 'true' else "恢復"
         return f"⚙️ 全域回報提醒已 **{status}**。" 
     finally:
-        conn.close()
+        if conn: conn.close()
 
 def test_daily_reminder(group_id):
     if group_id in EXCLUDE_GROUP_IDS:
@@ -473,4 +489,3 @@ def callback():
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 8080))
     print(f"Note: Running via Gunicorn in production. Use 'gunicorn app:app' to start.", file=sys.stderr)
-# 2025-11-22 Force Deploy Trigger
