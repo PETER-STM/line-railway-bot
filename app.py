@@ -37,7 +37,7 @@ if not LINE_CHANNEL_ACCESS_TOKEN:
 if not LINE_CHANNEL_SECRET:
     sys.exit("LINE_CHANNEL_SECRET is missing!")
 
-# 初始化 AI 模型 (保持原有的 AI 邏輯，但需要正確的引入)
+# 初始化 AI 模型
 model = None
 if GOOGLE_API_KEY:
     try:
@@ -54,7 +54,6 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # --- 活潑・幽默・微毒舌 回覆模板 ---
-# 修正了所有回覆中的 `\\n` 為 `\n`
 UNKNOWN_ERROR_TEXT = (
     "💥 發生未知錯誤。\n"
     "可能是宇宙磁場不順，或系統在叛逆。\n"
@@ -65,11 +64,69 @@ UNKNOWN_ERROR_TEXT = (
 def get_db_connection():
     conn = None
     try:
+        # 這裡不使用 sslmode='require'，因為 Railway 環境通常會自動處理 SSL
+        # 如果仍報錯，可以嘗試加入 sslmode='require'
         conn = psycopg2.connect(DATABASE_URL)
         return conn
     except Exception as e:
         print(f"Database connection error: {e}", file=sys.stderr)
         return None
+
+# --- 資料庫初始化 ---
+def ensure_tables_exist():
+    conn = get_db_connection()
+    if conn is None: return
+
+    try:
+        with conn.cursor() as cur:
+            # 1. VIP 名單表 (取代 reporters)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS group_vips (
+                    group_id TEXT NOT NULL, 
+                    vip_name TEXT NOT NULL,
+                    normalized_vip_name TEXT NOT NULL, 
+                    PRIMARY KEY (group_id, vip_name)
+                );
+            """)
+            # 2. 回報紀錄表 (report_content 已被移除，因為內容包含在原始訊息中)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS reports (
+                    id SERIAL PRIMARY KEY, 
+                    group_id TEXT NOT NULL,
+                    report_date DATE NOT NULL,
+                    reporter_name TEXT NOT NULL, 
+                    normalized_reporter_name TEXT NOT NULL, 
+                    log_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (group_id, report_date, normalized_reporter_name) 
+                );
+            """)
+            # 3. 系統設定表 (全域暫停)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY, 
+                    value TEXT NOT NULL
+                );
+            """)
+            # 4. 群組模式表 (AI 開關) <-- 這是您之前缺少的表
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS group_modes (
+                    group_id TEXT PRIMARY KEY,
+                    mode TEXT DEFAULT 'NORMAL' -- 'NORMAL' or 'AI'
+                );
+            """)
+            
+            # 初始化全域暫停狀態
+            cur.execute("INSERT INTO settings (key, value) VALUES ('is_paused', 'false') ON CONFLICT DO NOTHING;")
+            conn.commit()
+            print("INFO: Database tables checked/created.", file=sys.stderr)
+    except Exception as e:
+        print(f"DB INIT ERROR: {e}", file=sys.stderr)
+    finally:
+        conn.close()
+
+# 啟動時初始化 DB <--- 確保這段程式碼存在並被執行
+with app.app_context():
+    ensure_tables_exist()
 
 # --- 資料庫操作函式 (新增/刪除/查詢 VIP) ---
 
@@ -79,7 +136,7 @@ def add_vip_to_group(group_id, name):
 
     try:
         with conn.cursor() as cursor:
-            # 檢查 VIP 是否已存在
+            # 檢查 VIP 是否已存在 (只檢查原始名稱)
             cursor.execute(
                 "SELECT COUNT(*) FROM group_vips WHERE group_id = %s AND vip_name = %s;",
                 (group_id, name)
@@ -112,7 +169,8 @@ def remove_vip_from_group(group_id, name):
 
     try:
         with conn.cursor() as cursor:
-            # 嘗試使用正規化名稱進行刪除，這會刪除所有匹配正規化名稱的原始記錄
+            # 嘗試使用正規化名稱進行刪除
+            # 注意：這裡會刪除所有匹配正規化名稱的原始記錄，例如刪除 (三)浣熊 會把 浣熊 也刪掉
             cursor.execute(
                 "DELETE FROM group_vips WHERE group_id = %s AND normalized_vip_name = %s;",
                 (group_id, normalized_name_to_remove)
@@ -153,7 +211,8 @@ def list_vips_in_group(group_id):
             unique_vips = {}
             for vip_name, normalized_name in cursor.fetchall():
                 if normalized_name not in unique_vips:
-                    unique_vips[normalized_name] = vip_name
+                    # 優先保留第一次遇到的原始名稱
+                    unique_vips[normalized_name] = vip_name 
             
             vip_list = sorted(list(unique_vips.values()))
 
@@ -162,7 +221,7 @@ def list_vips_in_group(group_id):
                 return "📭 名單空空如也～\n\n快用 `新增人名 [姓名]` 把第一位勇者召喚進來吧！"
 
             # 格式化輸出
-            list_of_names = "\n".join(vip_list) # 修正：這裡應該是 \n
+            list_of_names = "\n".join(vip_list) 
             reply_text = (
                 f"📋 最新回報觀察名單如下：\n"
                 f"{list_of_names}\n\n"
@@ -196,8 +255,8 @@ def log_report(group_id, report_date, reporter_name):
             if not is_vip:
                 # 提示使用者不在 VIP 名單中
                 return (
-                    f"🧐 系統找不到 {reporter_name} 在 VIP 名單中。\n\n"
-                    f"請先請管理員用指令： `加VIP {reporter_name}` 把你加進來喔！\n"
+                    f"🧐 系統找不到 {name_for_db} 在 VIP 名單中。\n\n"
+                    f"請先請管理員用指令： `加VIP {name_for_db}` 把你加進來喔！\n"
                     f"（不然系統會假裝沒看到你交的心得... 😏）"
                 )
 
@@ -232,12 +291,17 @@ def log_report(group_id, report_date, reporter_name):
 # --- AI 相關函式 (從之前的程式碼中補回) ---
 def get_group_mode(group_id):
     conn = get_db_connection()
-    if not conn: return 'NORMAL'
+    # 如果資料庫連線失敗，預設關閉 AI 模式
+    if not conn: return 'NORMAL' 
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT mode FROM group_modes WHERE group_id = %s", (group_id,))
             res = cur.fetchone()
             return res[0] if res else 'NORMAL'
+    except Exception as e:
+        # 捕捉到 'group_modes' does not exist 的錯誤時，也返回 'NORMAL'
+        print(f"MODE GET ERROR: {e}", file=sys.stderr)
+        return 'NORMAL'
     finally:
         conn.close()
 
@@ -314,8 +378,16 @@ def handle_message(event):
     # 預處理：全形轉半形，便於指令匹配
     processed_text = text.replace('（', '(').replace('）', ')')
     
-    # --- 1. 系統指令 (從之前的程式碼中補回) ---
-    if processed_text == "開啟智能模式": reply_text = set_group_mode(group_id, 'AI')
+    # --- 1. 系統指令 ---
+    if processed_text == "指令" or processed_text == "幫助":
+        reply_text = (
+            "🤖 **功能選單**\n\n"
+            "📝 **回報**: `YYYY.MM.DD [姓名] [內容]`\n"
+            "👥 **管理**: `加VIP [姓名]`, `減VIP [姓名]`, `查詢名單`\n"
+            "⚙️ **AI**: `開啟智能模式`, `關閉智能模式`\n"
+            "🔧 **系統**: `測試排程`, `暫停回報提醒`, `恢復回報提醒`"
+        )
+    elif processed_text == "開啟智能模式": reply_text = set_group_mode(group_id, 'AI')
     elif processed_text == "關閉智能模式": reply_text = set_group_mode(group_id, 'NORMAL')
     elif processed_text == "暫停回報提醒": reply_text = set_global_pause('true')
     elif processed_text == "恢復回報提醒": reply_text = set_global_pause('false')
@@ -344,7 +416,7 @@ def handle_message(event):
                 reply_text = "🤷‍♀️ 請問想移除誰出 VIP 名單？\n\n請使用格式： `減VIP 姓名`"
         
         # 心得回報/打卡處理 (YYYY.MM.DD 姓名 OR YYYY/MM/DD 姓名)
-        # 修正 Regex: 確保只抓到日期和人名，並在遇到換行時停止
+        # Regex: 抓取日期 + 至少一個空格 + 人名 (直到換行)
         match_report = re.match(r"^(\d{4}[./]\d{2}[./]\d{2})\s+([^\n]+)", text)
         
         if match_report:
