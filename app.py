@@ -135,7 +135,7 @@ def add_vip_to_group(group_id, name):
     conn = get_db_connection()
     if not conn: return UNKNOWN_ERROR_TEXT
 
-    # 刪除時應該使用原始名稱
+    # 修正: 先處理名稱，避免在 f-string 內執行複雜運算
     name_for_db = name.split('\n', 1)[0].strip()
     normalized_name = normalize_name(name_for_db)
 
@@ -167,12 +167,13 @@ def remove_vip_from_group(group_id, name):
     conn = get_db_connection()
     if not conn: return UNKNOWN_ERROR_TEXT
 
-    # 必須使用正規化後的名稱來刪除，因為用戶輸入 '減VIP (三)浣熊' 和 '減VIP 浣熊' 都應刪除同一個概念的人
-    normalized_name_to_remove = normalize_name(name.split('\n', 1)[0].strip())
+    # 修正: 先處理名稱，避免在 f-string 內執行複雜運算 (解決 SyntaxError)
+    name_to_display = name.split('\n', 1)[0].strip()
+    normalized_name_to_remove = normalize_name(name_to_display)
 
     try:
         with conn.cursor() as cursor:
-            # 刪除所有正規化名稱匹配的記錄 (包括原始名稱和帶括號的名稱)
+            # 刪除所有正規化名稱匹配的記錄
             cursor.execute(
                 "DELETE FROM group_vips WHERE group_id = %s AND normalized_vip_name = %s;",
                 (group_id, normalized_name_to_remove)
@@ -187,10 +188,11 @@ def remove_vip_from_group(group_id, name):
             conn.commit()
 
             if rows_deleted > 0:
-                # 這裡使用用戶輸入的 name 來當作回覆主詞
-                return f"🗑️ {name.split('\n', 1)[0].strip()} 已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
+                # 修正: 使用 name_to_display 變數
+                return f"🗑️ {name_to_display} 已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
             else:
-                return f"❓名單裡根本沒有 {name.split('\n', 1)[0].strip()} 啊！\n\n是不是名字打錯，還是你其實不想他回報？"
+                # 修正: 使用 name_to_display 變數
+                return f"❓名單裡根本沒有 {name_to_display} 啊！\n\n是不是名字打錯，還是你其實不想他回報？"
 
     except Exception as e:
         print(f"DB Error (remove_vip_from_group): {e}", file=sys.stderr)
@@ -244,7 +246,7 @@ def log_report(group_id, report_date, reporter_name):
     conn = get_db_connection()
     if not conn: return UNKNOWN_ERROR_TEXT
     
-    # 確保傳入的 reporter_name 是乾淨的 (避免被之前的 regex 誤抓)
+    # 修正: 先處理名稱，避免在 f-string 內執行複雜運算
     name_for_db = reporter_name.split('\n', 1)[0].strip()
     normalized_name = normalize_name(name_for_db)
 
