@@ -10,10 +10,10 @@ from linebot import LineBotApi
 from linebot.exceptions import LineBotApiError
 from linebot.models import TextSendMessage
 
-# --- 姓名正規化工具 ---
+# --- 姓名正規化工具 (與 app.py 保持一致) ---
 def normalize_name(name):
     # 移除開頭括號內容 (如：(三) 浣熊 -> 浣熊)
-    normalized = re.sub(r'^\s*[\(（\[【][^()\[\]]{1,10}[\)）\]】]\s*', '', name).strip()
+    normalized = re.sub(r'^\s*[（(\[【][^()\[\]]{1,10}[)）\\]】]\s*', '', name).strip()
     return normalized if normalized else name
 
 # --- 環境變數 ---
@@ -29,13 +29,12 @@ if not LINE_CHANNEL_ACCESS_TOKEN or not DATABASE_URL:
 try:
     line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 except Exception as e:
-    # 這裡應該捕捉更具體的錯誤，但為了簡潔，保留原樣
-    print(f"LINE API Init ERROR: {e}", file=sys.stderr)
+    print(f"LINE BOT API INIT ERROR: {e}", file=sys.stderr)
     sys.exit(1)
 
 def get_db_connection():
     try:
-        # 使用 DSN 格式連線
+        # 使用 sslmode='require' 以確保安全連線
         return psycopg2.connect(DATABASE_URL, sslmode='require')
     except Exception as e:
         print(f"DB CONNECTION ERROR: {e}", file=sys.stderr)
@@ -43,7 +42,7 @@ def get_db_connection():
 
 def check_and_send_reminders(days_ago=1):
     """
-    檢查心得提交情況。
+    檢查心得提交情況並發送提醒。
     """
     print(f"--- Scheduler check started (days_ago={days_ago}) ---", file=sys.stderr)
     
@@ -51,8 +50,9 @@ def check_and_send_reminders(days_ago=1):
     if not conn: return
 
     try:
-        # 檢查是否全域暫停
         cur = conn.cursor()
+
+        # 1. 檢查是否全域暫停
         cur.execute("SELECT value FROM settings WHERE key = 'is_paused'")
         res = cur.fetchone()
         if res and res[0] == 'true':
@@ -62,19 +62,13 @@ def check_and_send_reminders(days_ago=1):
         # 設定日期
         target_date = (datetime.utcnow() - timedelta(days=days_ago)).date()
         
-        # 根據天數設定不同的提醒語氣
+        header = "📢 心得分享催繳大隊報到 📢"
+        reminder_text_ending = "不要逼系統變成奧客催款模式 😌"
         if days_ago == 0:
+            header = "🔔 今日提醒 (打卡開始了喔)"
             reminder_text_ending = "大家加油，不要忘了完成任務喔！💪"
-            header = "🔔 心得分享提醒 🔔"
-        elif days_ago == 1:
-            reminder_text_ending = "不要逼系統變成奧客催款模式 😌"
-            header = "📢 心得分享催繳大隊報到 📢"
-        else: # 補交
-             reminder_text_ending = f"快點補齊 {days_ago} 天前的作業吧！"
-             header = "🚨 陳年舊帳提醒 🚨"
 
-        # 1. 取得群組
-        # NOTE: 這裡使用 group_vips 表來獲取群組 ID，與 app.py 保持一致
+        # 2. 取得群組 (修正: reporters -> group_vips)
         cur.execute("SELECT DISTINCT group_id FROM group_vips")
         group_ids = [row[0] for row in cur.fetchall()]
 
@@ -82,28 +76,24 @@ def check_and_send_reminders(days_ago=1):
             if group_id in EXCLUDE_GROUP_IDS:
                 continue
 
-            # 2. 取得該群組所有成員 (正規化後去重)
-            # NOTE: 使用 group_vips 表
+            # 3. 取得該群組所有成員 (修正: reporters -> group_vips, 並取得 normalized_vip_name)
             cur.execute("SELECT normalized_vip_name FROM group_vips WHERE group_id = %s", (group_id,))
-            all_normalized_names = [row[0] for row in cur.fetchall()]
-            unique_vips = set(all_normalized_names) # 這裡直接使用 normalized name
+            all_normalized_names = {row[0] for row in cur.fetchall()} # 使用 set 避免重複
 
-            if not unique_vips: continue
+            if not all_normalized_names: continue
 
-            # 3. 取得已提交名單 (正規化後去重)
-            # NOTE: 使用 reports 表
-            cur.execute("SELECT normalized_reporter_name FROM reports WHERE group_id = %s AND report_date = %s", (group_id, target_date))
-            # ⭐️ 核心修正：將 cursor.fetchall() 修正為 cur.fetchall() ⭐️
-            submitted_names = [row[0] for row in cur.fetchall()]
-            submitted_vips = set(submitted_names) # 這裡 reports 裡存的就是 normalized name
+            # 4. 取得已提交名單 (reports 表中存的是 normalized_reporter_name)
+            cur.execute(
+                "SELECT normalized_reporter_name FROM reports WHERE group_id = %s AND report_date = %s", 
+                (group_id, target_date)
+            )
+            submitted_normalized_names = {row[0] for row in cur.fetchall()}
 
-            # 4. 找出未交
-            # 這裡的結果是 normalized name
-            missing_normalized = sorted(list(unique_vips - submitted_vips))
-            
+            # 5. 找出未交 (使用正規化名稱比較)
+            missing_normalized = sorted(list(all_normalized_names - submitted_normalized_names))
+
             if missing_normalized:
-                # 為了顯示友善，我們需要找出 missing_normalized 對應的原始/常用名稱
-                # 簡單起見，這裡直接列出 normalized name (通常也是乾淨的姓名)
+                # 這裡直接列出 normalized name (通常也是乾淨的姓名)
                 list_names = "\n".join([f"- {n}" for n in missing_normalized])
                 
                 msg = (
@@ -126,6 +116,7 @@ def check_and_send_reminders(days_ago=1):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--days-ago', type=int, default=1)
+    # 允許從 CLI 指定要檢查前幾天的回報
+    parser.add_argument('--days-ago', type=int, default=1) 
     args = parser.parse_args()
     check_and_send_reminders(args.days_ago)

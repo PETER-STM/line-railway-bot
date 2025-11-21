@@ -10,7 +10,7 @@ import psycopg2
 # 引入 Google Gemini (如果 GOOGLE_API_KEY 有設置)
 import google.generativeai as genai 
 
-# --- 姓名正規化工具 (用於確保 VIP 記錄唯一性，並解決重複名稱問題) ---
+# --- 姓名正規化工具 (用於確保 VIP 記錄唯一性
 def normalize_name(name):
     """
     對人名進行正規化處理，主要移除開頭的班級或編號標記。
@@ -27,7 +27,7 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY') 
-# NEW: 排除的群組ID列表 (用於測試功能時跳過某些群組)
+# 排除的群組ID列表
 EXCLUDE_GROUP_IDS_STR = os.environ.get('EXCLUDE_GROUP_IDS', '')
 EXCLUDE_GROUP_IDS = set(EXCLUDE_GROUP_IDS_STR.split(',')) if EXCLUDE_GROUP_IDS_STR else set()
 
@@ -43,7 +43,7 @@ if GOOGLE_API_KEY:
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
         model = genai.GenerativeModel('gemini-1.5-flash')
-        print("INFO: Gemini AI model initialized successfully.", file=sys.stderr)
+        # print("INFO: Gemini AI model initialized successfully.", file=sys.stderr) # 部署日誌會顯示
     except Exception as e:
         print(f"WARNING: Failed to initialize Gemini AI: {e}", file=sys.stderr)
 else:
@@ -64,22 +64,23 @@ UNKNOWN_ERROR_TEXT = (
 def get_db_connection():
     conn = None
     try:
-        # 這裡不使用 sslmode='require'，因為 Railway 環境通常會自動處理 SSL
-        # 如果仍報錯，可以嘗試加入 sslmode='require'
-        conn = psycopg2.connect(DATABASE_URL)
+        # 使用 sslmode='require' 以確保安全連線
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
         return conn
     except Exception as e:
         print(f"Database connection error: {e}", file=sys.stderr)
         return None
 
-# --- 資料庫初始化 ---
+# --- 資料庫初始化 (修正後，確保所有表被創建) ---
 def ensure_tables_exist():
     conn = get_db_connection()
-    if conn is None: return
+    if conn is None: 
+        print("DB INIT ERROR: Cannot get database connection.", file=sys.stderr)
+        return
 
     try:
         with conn.cursor() as cur:
-            # 1. VIP 名單表 (取代 reporters)
+            # 1. VIP 名單表
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS group_vips (
                     group_id TEXT NOT NULL, 
@@ -88,7 +89,7 @@ def ensure_tables_exist():
                     PRIMARY KEY (group_id, vip_name)
                 );
             """)
-            # 2. 回報紀錄表 (report_content 已被移除，因為內容包含在原始訊息中)
+            # 2. 回報紀錄表
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS reports (
                     id SERIAL PRIMARY KEY, 
@@ -107,7 +108,7 @@ def ensure_tables_exist():
                     value TEXT NOT NULL
                 );
             """)
-            # 4. 群組模式表 (AI 開關) <-- 這是您之前缺少的表
+            # 4. 群組模式表 (AI 開關)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS group_modes (
                     group_id TEXT PRIMARY KEY,
@@ -124,7 +125,7 @@ def ensure_tables_exist():
     finally:
         conn.close()
 
-# 啟動時初始化 DB <--- 確保這段程式碼存在並被執行
+# 啟動時初始化 DB
 with app.app_context():
     ensure_tables_exist()
 
@@ -134,25 +135,27 @@ def add_vip_to_group(group_id, name):
     conn = get_db_connection()
     if not conn: return UNKNOWN_ERROR_TEXT
 
+    # 刪除時應該使用原始名稱
+    name_for_db = name.split('\n', 1)[0].strip()
+    normalized_name = normalize_name(name_for_db)
+
     try:
         with conn.cursor() as cursor:
             # 檢查 VIP 是否已存在 (只檢查原始名稱)
             cursor.execute(
                 "SELECT COUNT(*) FROM group_vips WHERE group_id = %s AND vip_name = %s;",
-                (group_id, name)
+                (group_id, name_for_db)
             )
             if cursor.fetchone()[0] > 0:
-                # 新版：新增人名 (重複)
-                return f"🤨 {name} 早就在名單裡面坐好坐滿了，\n\n你該不會…忘記上一次也加過吧？"
+                return f"🤨 {name_for_db} 早就在名單裡面坐好坐滿了，\n\n你該不會…忘記上一次也加過吧？"
 
             # 新增 VIP
             cursor.execute(
                 "INSERT INTO group_vips (group_id, vip_name, normalized_vip_name) VALUES (%s, %s, %s);",
-                (group_id, name, normalize_name(name))
+                (group_id, name_for_db, normalized_name)
             )
             conn.commit()
-            # 新版：新增人名 (成功)
-            return f"🎉 好嘞～ {name} 已成功加入名單！\n\n（逃不掉了，祝他順利回報。）"
+            return f"🎉 好嘞～ {name_for_db} 已成功加入名單！\n\n（逃不掉了，祝他順利回報。）"
 
     except Exception as e:
         print(f"DB Error (add_vip_to_group): {e}", file=sys.stderr)
@@ -164,18 +167,18 @@ def remove_vip_from_group(group_id, name):
     conn = get_db_connection()
     if not conn: return UNKNOWN_ERROR_TEXT
 
-    # 必須使用正規化後的名稱來刪除，以匹配潛在的錯誤輸入
-    normalized_name_to_remove = normalize_name(name)
+    # 必須使用正規化後的名稱來刪除，因為用戶輸入 '減VIP (三)浣熊' 和 '減VIP 浣熊' 都應刪除同一個概念的人
+    normalized_name_to_remove = normalize_name(name.split('\n', 1)[0].strip())
 
     try:
         with conn.cursor() as cursor:
-            # 嘗試使用正規化名稱進行刪除
-            # 注意：這裡會刪除所有匹配正規化名稱的原始記錄，例如刪除 (三)浣熊 會把 浣熊 也刪掉
+            # 刪除所有正規化名稱匹配的記錄 (包括原始名稱和帶括號的名稱)
             cursor.execute(
                 "DELETE FROM group_vips WHERE group_id = %s AND normalized_vip_name = %s;",
                 (group_id, normalized_name_to_remove)
             )
             rows_deleted = cursor.rowcount
+            
             # 也要刪除 reports 裡的紀錄，防止殘留
             cursor.execute(
                 "DELETE FROM reports WHERE group_id = %s AND normalized_reporter_name = %s;",
@@ -184,11 +187,10 @@ def remove_vip_from_group(group_id, name):
             conn.commit()
 
             if rows_deleted > 0:
-                # 新版：刪除人名 (成功)
-                return f"🗑️ {name} 已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
+                # 這裡使用用戶輸入的 name 來當作回覆主詞
+                return f"🗑️ {name.split('\n', 1)[0].strip()} 已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
             else:
-                # 新版：刪除人名 (未找到)
-                return f"❓名單裡根本沒有 {name} 啊！\n\n是不是名字打錯，還是你其實不想他回報？"
+                return f"❓名單裡根本沒有 {name.split('\n', 1)[0].strip()} 啊！\n\n是不是名字打錯，還是你其實不想他回報？"
 
     except Exception as e:
         print(f"DB Error (remove_vip_from_group): {e}", file=sys.stderr)
@@ -203,22 +205,25 @@ def list_vips_in_group(group_id):
 
     try:
         with conn.cursor() as cursor:
+            # 查詢所有 VIP 的原始名稱和正規化名稱
             cursor.execute(
-                "SELECT DISTINCT vip_name, normalized_vip_name FROM group_vips WHERE group_id = %s ORDER BY normalized_vip_name, vip_name;",
+                "SELECT vip_name, normalized_vip_name FROM group_vips WHERE group_id = %s ORDER BY normalized_vip_name, vip_name;",
                 (group_id,)
             )
-            # 根據 normalized_name 去重
+            
+            # 優化：根據 normalized_name 去重，並優先保留不帶括號的名稱作為顯示名稱
             unique_vips = {}
             for vip_name, normalized_name in cursor.fetchall():
-                if normalized_name not in unique_vips:
-                    # 優先保留第一次遇到的原始名稱
-                    unique_vips[normalized_name] = vip_name 
+                # 如果這個正規化名稱還沒被記錄，或者當前的 vip_name 是一個更「乾淨」的版本
+                if normalized_name not in unique_vips or (
+                   normalized_name == vip_name and normalized_name != unique_vips[normalized_name]
+                ):
+                    unique_vips[normalized_name] = vip_name
             
             vip_list = sorted(list(unique_vips.values()))
 
             if not vip_list:
-                # 新版：查詢名單 (無成員)
-                return "📭 名單空空如也～\n\n快用 `新增人名 [姓名]` 把第一位勇者召喚進來吧！"
+                return "📭 名單空空如也～\n\n快用 `加VIP [姓名]` 把第一位勇者召喚進來吧！"
 
             # 格式化輸出
             list_of_names = "\n".join(vip_list) 
@@ -266,7 +271,6 @@ def log_report(group_id, report_date, reporter_name):
                 (group_id, report_date, normalized_name)
             )
             if cursor.fetchone():
-                # 新版：記錄回報 (重複記錄)
                 date_str = report_date.strftime('%Y.%m.%d')
                 return f"⚠️ {name_for_db} ({date_str}) 今天已經回報過了！\n\n別想靠重複交作業刷存在感，我看的很清楚 👀"
 
@@ -277,7 +281,6 @@ def log_report(group_id, report_date, reporter_name):
             )
             conn.commit()
 
-            # 新版：記錄回報 (成功)
             date_str = report_date.strftime('%Y.%m.%d')
             return f"👌 收到！{name_for_db} ({date_str}) 的心得已成功登入檔案。\n\n（今天有乖，給你一個隱形貼紙 ⭐）"
 
@@ -288,10 +291,9 @@ def log_report(group_id, report_date, reporter_name):
         if conn: conn.close()
 
 
-# --- AI 相關函式 (從之前的程式碼中補回) ---
+# --- AI 相關函式 (保持不變) ---
 def get_group_mode(group_id):
     conn = get_db_connection()
-    # 如果資料庫連線失敗，預設關閉 AI 模式
     if not conn: return 'NORMAL' 
     try:
         with conn.cursor() as cur:
@@ -299,7 +301,6 @@ def get_group_mode(group_id):
             res = cur.fetchone()
             return res[0] if res else 'NORMAL'
     except Exception as e:
-        # 捕捉到 'group_modes' does not exist 的錯誤時，也返回 'NORMAL'
         print(f"MODE GET ERROR: {e}", file=sys.stderr)
         return 'NORMAL'
     finally:
@@ -351,9 +352,7 @@ def set_global_pause(state):
 
 def test_daily_reminder(group_id):
     if group_id in EXCLUDE_GROUP_IDS:
-         # 新版：測試排程 (已排除群組)
          return "🚫 這個群組在「排除名單」裡，\n\n排程器看到這邊會自動裝死，不會發任何提醒。"
-    # 新版：測試排程 (正常群組)
     return "🔔 測試指令 OK！\n\n請坐等排程器在設定時間跳出來嚇你，\n\n以確認系統正常運作。"
 
 # --- LINE 事件處理 ---
@@ -431,13 +430,11 @@ def handle_message(event):
                 
                 # 確保人名不為空
                 if not reporter_name or not normalize_name(reporter_name):
-                    # 新版：記錄回報 (人名遺失) 模板
                     reply_text = "⚠️ 日期後面請記得加上人名，不然我不知道誰交的啊！\n\n（你總不會想讓我自己猜吧？）"
                 else:
                     reply_text = log_report(group_id, report_date, reporter_name)
                 
             except ValueError:
-                # 新版：記錄回報 (日期格式錯誤) 模板
                 reply_text = "❌ 日期長得怪怪的。\n\n請用標準格式：YYYY.MM.DD 姓名\n\n（小數點不是你的自由發揮。）"
 
     # --- 3. AI 閒聊 ---
@@ -473,5 +470,4 @@ def callback():
 # --- 啟動 Flask 應用 (通常用於本地測試) ---
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 8080))
-    # app.run(host='0.0.0.0', port=port, debug=False)
     print(f"Note: Running via Gunicorn in production. Use 'gunicorn app:app' to start.", file=sys.stderr)
