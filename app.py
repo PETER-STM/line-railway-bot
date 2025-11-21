@@ -473,3 +473,4 @@ def callback():
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 8080))
     print(f"Note: Running via Gunicorn in production. Use 'gunicorn app:app' to start.", file=sys.stderr)
+# 2025-11-22 Force Deploy Trigger
