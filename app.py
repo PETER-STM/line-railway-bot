@@ -1,26 +1,19 @@
 import os
 import sys
 import re
-import json
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError, LineBotApiError
+from linebot.exceptions import InvalidSignatureError, LineBotApiError, LineBotApiError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, SourceGroup, SourceRoom, SourceUser
 import psycopg2
 import google.generativeai as genai
-
-# --- 姓名正規化工具 ---
-def normalize_name(name):
-    # 移除開頭被括號包裹的內容
-    normalized = re.sub(r'^\s*[（(\[【][^()\[\]]{1,10}[)）\]】]\s*', '', name).strip()
-    return normalized if normalized else name
 
 # --- 環境變數設定 ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 DATABASE_URL = os.environ.get('DATABASE_URL')
-GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY') # AI 金鑰
+GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 
 # 排除的群組ID列表
 EXCLUDE_GROUP_IDS_STR = os.environ.get('EXCLUDE_GROUP_IDS', '')
@@ -32,13 +25,13 @@ if not LINE_CHANNEL_ACCESS_TOKEN:
 if not LINE_CHANNEL_SECRET:
     sys.exit("LINE_CHANNEL_SECRET is missing!")
 
-# 初始化 AI
+# 初始化 Gemini AI
 model = None
 if GOOGLE_API_KEY:
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
         model = genai.GenerativeModel('gemini-1.5-flash')
-        # print("INFO: Gemini AI initialized.", file=sys.stderr)
+        print("INFO: Gemini AI initialized.", file=sys.stderr)
     except Exception as e:
         print(f"WARNING: Gemini AI init failed: {e}", file=sys.stderr)
 else:
@@ -56,7 +49,7 @@ def get_db_connection():
         print(f"DB CONNECTION ERROR: {e}", file=sys.stderr)
         return None
 
-# --- 資料庫初始化 (新增 AI 相關表格) ---
+# --- 資料庫初始化 ---
 def ensure_tables_exist():
     conn = get_db_connection()
     if not conn: return
@@ -84,21 +77,11 @@ def ensure_tables_exist():
                     key TEXT PRIMARY KEY, value TEXT NOT NULL
                 );
             """)
-            # 4. 群組模式表 (控制 AI 開關) - NEW
+            # 4. 群組模式表 (控制 AI 開關)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS group_modes (
                     group_id TEXT PRIMARY KEY,
                     mode TEXT DEFAULT 'NORMAL'
-                );
-            """)
-            # 5. 聊天記錄表 (AI 記憶) - NEW
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS chat_history (
-                    id SERIAL PRIMARY KEY,
-                    group_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    message TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
             
@@ -113,9 +96,11 @@ def ensure_tables_exist():
 with app.app_context():
     ensure_tables_exist()
 
+# --- 工具函式 ---
+def normalize_name(name):
+    return re.sub(r'^\s*[（(\[【][^()\[\]]{1,10}[)）\]】]\s*', '', name).strip()
 
-# --- AI 輔助函式 ---
-
+# --- AI 相關函式 ---
 def get_group_mode(group_id):
     conn = get_db_connection()
     if not conn: return 'NORMAL'
@@ -132,116 +117,40 @@ def set_group_mode(group_id, mode):
     if not conn: return "💥 資料庫連線失敗。"
     try:
         with conn.cursor() as cur:
-            # 切換模式
             cur.execute("""
                 INSERT INTO group_modes (group_id, mode) VALUES (%s, %s)
                 ON CONFLICT (group_id) DO UPDATE SET mode = EXCLUDED.mode
             """, (group_id, mode))
-            
-            # 切換模式時清除記憶，避免混亂
-            cur.execute("DELETE FROM chat_history WHERE group_id = %s", (group_id,))
-            
             conn.commit()
-        
         status = "🤖 智能對話 (AI)" if mode == 'AI' else "🔇 一般安靜 (NORMAL)"
-        return f"🔄 模式已切換為：**{status}**\n\n（記憶已清除，重新開始！）"
+        return f"🔄 模式已切換為：**{status}**"
     except Exception as e:
         return f"💥 設定失敗：{e}"
     finally:
         conn.close()
 
-def save_chat_log(group_id, role, message):
-    """儲存對話紀錄"""
-    conn = get_db_connection()
-    if not conn: return
-    try:
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO chat_history (group_id, role, message) VALUES (%s, %s, %s)", (group_id, role, message))
-            
-            # 保持每個群組最新的 10 條紀錄，刪除舊的
-            cur.execute("""
-                DELETE FROM chat_history 
-                WHERE id IN (
-                    SELECT id FROM chat_history 
-                    WHERE group_id = %s 
-                    ORDER BY created_at DESC 
-                    OFFSET 10
-                )
-            """, (group_id,))
-            conn.commit()
-    except Exception as e:
-        print(f"CHAT LOG ERROR: {e}", file=sys.stderr)
-    finally:
-        conn.close()
-
-def get_chat_history(group_id):
-    """取得最近對話紀錄"""
-    conn = get_db_connection()
-    if not conn: return []
-    try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT role, message FROM chat_history WHERE group_id = %s ORDER BY created_at ASC", (group_id,))
-            rows = cur.fetchall()
-            # 轉換為 Gemini 格式
-            history = []
-            for role, msg in rows:
-                # Gemini API 使用 'user' 和 'model'
-                gemini_role = 'user' if role == 'user' else 'model'
-                history.append({"role": gemini_role, "parts": [{"text": msg}]})
-            return history
-    except Exception as e:
-        print(f"GET HISTORY ERROR: {e}", file=sys.stderr)
-        return []
-    finally:
-        conn.close()
-
-def chat_with_ai(group_id, user_message):
+def chat_with_ai(text):
     if not model: return None
-    
-    # 1. 儲存使用者訊息
-    save_chat_log(group_id, 'user', user_message)
-    
     try:
-        # 2. 取得歷史紀錄
-        history = get_chat_history(group_id) # 包含剛剛存入的使用者訊息
-        
-        # 3. 系統提示
-        system_instruction = "你是一個幽默、微毒舌但樂於助人的團隊助理 Bot「摳你錢3000」。請用繁體中文簡短回應，不要長篇大論。如果是閒聊就陪聊，如果是問題就回答。"
-        
-        # 4. 呼叫 API
-        chat = model.start_chat(history=history[:-1]) # history 不包含最後一條 user message，因為 send_message 會傳入
-        response = chat.send_message(
-            user_message,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.7
-            )
-        )
-        
-        reply_text = response.text.strip()
-        
-        # 5. 儲存 AI 回應
-        save_chat_log(group_id, 'model', reply_text)
-        
-        return reply_text
-
+        prompt = f"你是一個幽默、有點毒舌但很樂於助人的團隊助理 Bot。請用繁體中文簡短回答：{text}"
+        response = model.generate_content(prompt)
+        return response.text.strip()
     except Exception as e:
         print(f"AI ERROR: {e}", file=sys.stderr)
         return "😵‍💫 AI 腦袋打結了，請稍後再試。"
 
-# --- 資料庫操作 (維持原樣) ---
+# --- 資料庫操作 ---
 
 def add_reporter(group_id, reporter_name):
     conn = get_db_connection()
     if not conn: return "💥 連線失敗。"
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM reporters WHERE group_id = %s AND reporter_name = %s", (group_id, reporter_name))
-            if cur.fetchone():
-                return f"🤨 {reporter_name} 早就在名單裡面坐好坐滿了，\n\n你該不會…忘記上一次也加過吧？"
-            
-            cur.execute("INSERT INTO reporters (group_id, reporter_name) VALUES (%s, %s)", (group_id, reporter_name))
-            conn.commit()
-            return f"🎉 好嘞～ {reporter_name} 已成功加入名單！\n\n（逃不掉了，祝他順利回報。）"
+            cur.execute("INSERT INTO reporters (group_id, reporter_name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (group_id, reporter_name))
+            if cur.rowcount > 0:
+                conn.commit()
+                return f"🎉 好嘞～ {reporter_name} 已成功加入名單！\n\n（逃不掉了，祝他順利回報。）"
+            return f"🤨 {reporter_name} 早就在名單裡面坐好坐滿了。"
     except Exception as e:
         print(f"ADD ERROR: {e}", file=sys.stderr)
         return "💥 新增失敗。"
@@ -258,7 +167,7 @@ def delete_reporter(group_id, reporter_name):
                 cur.execute("DELETE FROM reports WHERE group_id = %s AND reporter_name = %s", (group_id, reporter_name))
                 conn.commit()
                 return f"🗑️ {reporter_name} 已從名單中被溫柔移除。\n\n（放心，我沒有把人綁走，只是移出名單。）"
-            return f"❓名單裡根本沒有 {reporter_name} 啊！\n\n是不是名字打錯，還是你其實不想他回報？"
+            return f"❓名單裡根本沒有 {reporter_name} 啊！"
     except Exception as e:
         print(f"DEL ERROR: {e}", file=sys.stderr)
         return "💥 刪除失敗。"
@@ -291,10 +200,10 @@ def log_report(group_id, date_str, reporter_name, content):
     try:
         r_date = datetime.strptime(date_str, '%Y.%m.%d').date()
         with conn.cursor() as cur:
-            # 自動補名單
+            # 自動補名單 (用原始名)
             cur.execute("INSERT INTO reporters (group_id, reporter_name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (group_id, reporter_name))
             
-            # 檢查重複
+            # 檢查重複 (用正規化名)
             cur.execute("SELECT reporter_name FROM reports WHERE group_id = %s AND report_date = %s", (group_id, r_date))
             submitted_raw = [row[0] for row in cur.fetchall()]
             submitted_norm = [normalize_name(n) for n in submitted_raw]
@@ -391,7 +300,7 @@ def handle_message(event):
 
     # 3. AI 閒聊 (最後)
     if not reply and get_group_mode(group_id) == 'AI':
-        reply = chat_with_ai(group_id, text)
+        reply = chat_with_ai(text)
 
     if reply:
         try:
