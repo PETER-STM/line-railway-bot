@@ -98,5 +98,3 @@ if __name__ == "__main__":
     parser.add_argument('--days-ago', type=int, default=1)
     args = parser.parse_args()
     check_reminders(args.days_ago)
-
-
