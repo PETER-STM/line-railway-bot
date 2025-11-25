@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError, LineBotApiError, LineBotApiError
+from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, SourceGroup, SourceRoom, SourceUser
 import psycopg2
 import google.generativeai as genai
@@ -186,7 +186,7 @@ def get_reporter_list(group_id):
                 normalized_set = sorted(list(set([normalize_name(r) for r in reporters])))
                 list_str = "\n".join([f"🔸 {name}" for name in normalized_set])
                 return f"📋 最新回報觀察名單如下：\n{list_str}\n\n（嗯，看起來大家都還活著。）"
-            return "📭 名單空空如也～\n\n快用 新增人名 [姓名] 把第一位勇者召喚進來吧！"
+            return "📭 名單空空如也～\n\n快用 `新增人名 [姓名]` 把第一位勇者召喚進來吧！"
     except Exception as e:
         print(f"LIST ERROR: {e}", file=sys.stderr)
         return "💥 查詢失敗。"
@@ -268,6 +268,7 @@ def handle_message(event):
     
     if not group_id or group_id in EXCLUDE_GROUP_IDS: return
 
+    # 預處理
     processed_text = text.strip().replace('（', '(').replace('）', ')')
     first_line = processed_text.split('\n')[0].strip()
     reply = None
@@ -311,3 +312,6 @@ def handle_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
+
+
+
