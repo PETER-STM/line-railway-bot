@@ -22,7 +22,6 @@ except:
     sys.exit(1)
 
 def normalize_name(name):
-    # 修正 Regex: 確保括號匹配正確
     return re.sub(r'^\s*[（(\[【][^()\[\]]{1,10}[)）\]】]\s*', '', name).strip()
 
 def get_db():
@@ -42,14 +41,11 @@ def check_reminders(days_ago=1):
     try:
         cur = conn.cursor()
         # 1. 檢查全域暫停
-        try:
-            cur.execute("SELECT value FROM settings WHERE key = 'is_paused'")
-            res = cur.fetchone()
-            if res and res[0] == 'true':
-                print("INFO: Scheduler PAUSED.", file=sys.stderr)
-                return
-        except:
-            pass # 表格可能不存在，忽略錯誤
+        cur.execute("SELECT value FROM settings WHERE key = 'is_paused'")
+        res = cur.fetchone()
+        if res and res[0] == 'true':
+            print("INFO: Scheduler PAUSED.", file=sys.stderr)
+            return
 
         # 日期設定 (UTC+8)
         now_tst = datetime.utcnow() + timedelta(hours=8)
@@ -70,16 +66,14 @@ def check_reminders(days_ago=1):
             # 應交名單
             cur.execute("SELECT reporter_name FROM reporters WHERE group_id = %s", (gid,))
             all_raw = [r[0] for r in cur.fetchall()]
-            # 正規化名單 (應交)
             all_norm = {normalize_name(n) for n in all_raw}
 
             # 已交名單
             cur.execute("SELECT reporter_name FROM reports WHERE group_id = %s AND report_date = %s", (gid, target_date))
             done_raw = [r[0] for r in cur.fetchall()]
-            # 正規化名單 (已交)
             done_norm = {normalize_name(n) for n in done_raw}
 
-            # 找出未交 (正規化後比對)
+            # 未交
             missing = sorted(list(all_norm - done_norm))
 
             if missing:
@@ -103,5 +97,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--days-ago', type=int, default=1)
     args = parser.parse_args()
-    
     check_reminders(args.days_ago)
+
+

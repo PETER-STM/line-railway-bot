@@ -13,7 +13,9 @@ import google.generativeai as genai
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 DATABASE_URL = os.environ.get('DATABASE_URL')
-GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
+GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY') # 新增：Gemini API Key
+
+# 排除的群組ID列表
 EXCLUDE_GROUP_IDS_STR = os.environ.get('EXCLUDE_GROUP_IDS', '')
 EXCLUDE_GROUP_IDS = set(EXCLUDE_GROUP_IDS_STR.split(',')) if EXCLUDE_GROUP_IDS_STR else set()
 
@@ -23,7 +25,7 @@ if not LINE_CHANNEL_ACCESS_TOKEN:
 if not LINE_CHANNEL_SECRET:
     sys.exit("LINE_CHANNEL_SECRET is missing!")
 
-# 初始化 Gemini AI
+# 初始化 AI 模型
 model = None
 if GOOGLE_API_KEY:
     try:
@@ -38,13 +40,6 @@ else:
 app = Flask(__name__)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
-
-# --- 工具函式 ---
-def normalize_name(name):
-    # 移除開頭被括號包裹的內容
-    # 修正 Regex: 確保括號匹配正確
-    normalized = re.sub(r'^\s*[（(\[【][^()\[\]]{1,10}[)）\]】]\s*', '', name).strip()
-    return normalized if normalized else name
 
 # --- 資料庫連線 ---
 def get_db_connection():
@@ -82,7 +77,7 @@ def ensure_tables_exist():
                     key TEXT PRIMARY KEY, value TEXT NOT NULL
                 );
             """)
-            # 4. 群組模式表 (控制 AI 開關)
+            # 4. 群組模式表 (控制 AI 開關) - NEW
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS group_modes (
                     group_id TEXT PRIMARY KEY,
@@ -101,6 +96,9 @@ def ensure_tables_exist():
 with app.app_context():
     ensure_tables_exist()
 
+# --- 工具函式 ---
+def normalize_name(name):
+    return re.sub(r'^\s*[（(\[【][^()\[\]]{1,10}[)）\]】]\s*', '', name).strip()
 
 # --- AI 相關函式 ---
 def get_group_mode(group_id):
@@ -184,7 +182,7 @@ def get_reporter_list(group_id):
             cur.execute("SELECT reporter_name FROM reporters WHERE group_id = %s ORDER BY reporter_name", (group_id,))
             reporters = [row[0] for row in cur.fetchall()]
             if reporters:
-                # 正規化顯示 (合併重複的實體人名)
+                # 正規化去重顯示
                 normalized_set = sorted(list(set([normalize_name(r) for r in reporters])))
                 list_str = "\n".join([f"🔸 {name}" for name in normalized_set])
                 return f"📋 最新回報觀察名單如下：\n{list_str}\n\n（嗯，看起來大家都還活著。）"
@@ -202,26 +200,19 @@ def log_report(group_id, date_str, reporter_name, content):
     try:
         r_date = datetime.strptime(date_str, '%Y.%m.%d').date()
         with conn.cursor() as cur:
-            # 1. 自動補名單 (用原始名)
+            # 自動補名單 (用原始名)
             cur.execute("INSERT INTO reporters (group_id, reporter_name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (group_id, reporter_name))
             
-            # 2. 檢查重複 (用正規化名)
+            # 檢查重複 (用正規化名)
             cur.execute("SELECT reporter_name FROM reports WHERE group_id = %s AND report_date = %s", (group_id, r_date))
-            submitted_raw_names = [row[0] for row in cur.fetchall()]
-            submitted_normalized = [normalize_name(n) for n in submitted_raw_names]
+            submitted_raw = [row[0] for row in cur.fetchall()]
+            submitted_norm = [normalize_name(n) for n in submitted_raw]
 
-            if normalized in submitted_normalized:
+            if normalized in submitted_norm:
                 return f"⚠️ {reporter_name} ({date_str}) 今天已經回報過了！\n\n別想靠重複交作業刷存在感，我看的很清楚 👀"
 
-            # 3. 寫入紀錄
-            # 修正 SQL 語法錯誤: ON CONFLICT ... DO UPDATE SET ...
             cur.execute(
-                """
-                INSERT INTO reports (group_id, reporter_name, report_date, report_content) 
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (group_id, reporter_name, report_date) 
-                DO UPDATE SET report_content = EXCLUDED.report_content, log_time = CURRENT_TIMESTAMP
-                """,
+                "INSERT INTO reports (group_id, reporter_name, report_date, report_content) VALUES (%s, %s, %s, %s)",
                 (group_id, reporter_name, r_date, content)
             )
             conn.commit()
@@ -284,7 +275,7 @@ def handle_message(event):
 
     # 1. 系統指令
     if first_line in ["指令", "幫助", "help"]:
-        reply = "🤖 **功能選單**\n\n📝 回報: `YYYY.MM.DD [姓名]`\n👥 管理: `新增人名`, `刪除人名`, `查詢名單`\n⚙️ AI: `開啟智能模式`, `關閉智能模式`\n🔧 系統: `測試排程`, `暫停回報提醒`, `恢復回報提醒`"
+        reply = "🤖 **指令清單**\n\n📝 回報: `YYYY.MM.DD [姓名]`\n👥 管理: `新增人名`, `刪除人名`, `查詢名單`\n⚙️ AI: `開啟智能模式`, `關閉智能模式`\n🔧 系統: `測試排程`, `暫停回報提醒`, `恢復回報提醒`"
     elif first_line == "暫停回報提醒": reply = set_global_pause('true')
     elif first_line == "恢復回報提醒": reply = set_global_pause('false')
     elif first_line in ["發送提醒測試", "測試排程"]: reply = test_daily_reminder(group_id)
@@ -305,7 +296,6 @@ def handle_message(event):
         match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s*(?:\(.*\))?\s*(.+?)\s*([\s\S]*)", text, re.DOTALL)
         if match_report:
             d_str, name = match_report.group(1), match_report.group(2).strip()
-            # 取用完整 text 作為 content
             content = text
             if name: reply = log_report(group_id, d_str, name, content)
 
@@ -322,5 +312,6 @@ def handle_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
+
 
 
