@@ -13,7 +13,7 @@ import google.generativeai as genai
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 DATABASE_URL = os.environ.get('DATABASE_URL')
-GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY') # 新增：Gemini API Key
+GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 
 # 排除的群組ID列表
 EXCLUDE_GROUP_IDS_STR = os.environ.get('EXCLUDE_GROUP_IDS', '')
@@ -25,7 +25,7 @@ if not LINE_CHANNEL_ACCESS_TOKEN:
 if not LINE_CHANNEL_SECRET:
     sys.exit("LINE_CHANNEL_SECRET is missing!")
 
-# 初始化 AI 模型
+# 初始化 Gemini AI
 model = None
 if GOOGLE_API_KEY:
     try:
@@ -77,7 +77,7 @@ def ensure_tables_exist():
                     key TEXT PRIMARY KEY, value TEXT NOT NULL
                 );
             """)
-            # 4. 群組模式表 (控制 AI 開關) - NEW
+            # 4. 群組模式表 (控制 AI 開關)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS group_modes (
                     group_id TEXT PRIMARY KEY,
@@ -85,7 +85,7 @@ def ensure_tables_exist():
                 );
             """)
             
-            cur.execute("INSERT INTO settings (key, value) VALUES ('is_paused', 'false') ON CONFLICT DO NOTHING;")
+            cur.execute("INSERT INTO settings (key, value) VALUES ('is_paused', 'false') ON CONFLICT (key) DO NOTHING;")
             conn.commit()
             print("INFO: DB Schema initialized.", file=sys.stderr)
     except Exception as e:
@@ -98,6 +98,7 @@ with app.app_context():
 
 # --- 工具函式 ---
 def normalize_name(name):
+    # 移除開頭被括號包裹的內容
     return re.sub(r'^\s*[（(\[【][^()\[\]]{1,10}[)）\]】]\s*', '', name).strip()
 
 # --- AI 相關函式 ---
@@ -204,15 +205,31 @@ def log_report(group_id, date_str, reporter_name, content):
             cur.execute("INSERT INTO reporters (group_id, reporter_name) VALUES (%s, %s) ON CONFLICT DO NOTHING", (group_id, reporter_name))
             
             # 檢查重複 (用正規化名)
+            # 注意：這裡的邏輯假設所有同名的變體都已經被正規化並儲存在名單中
+            # 實際上，我們需要對已提交的名單進行正規化比較
             cur.execute("SELECT reporter_name FROM reports WHERE group_id = %s AND report_date = %s", (group_id, r_date))
-            submitted_raw = [row[0] for row in cur.fetchall()]
-            submitted_norm = [normalize_name(n) for n in submitted_raw]
+            submitted_raw_names = [row[0] for row in cur.fetchall()]
+            submitted_normalized = [normalize_name(n) for n in submitted_raw_names]
 
-            if normalized in submitted_norm:
+            if normalized in submitted_normalized:
                 return f"⚠️ {reporter_name} ({date_str}) 今天已經回報過了！\n\n別想靠重複交作業刷存在感，我看的很清楚 👀"
 
+            # 3. 寫入紀錄
+            # 修正 SQL 語法: ON CONFLICT (group_id, reporter_name, report_date)
+            # 注意: 这里的 ON CONFLICT 是针对 unique constraint 的，如果 constraint 是 (group_id, reporter_name, report_date)
+            # 那麼只有完全相同的原始名稱才會觸發衝突。
+            # 如果我們希望正規化名稱相同的也視為衝突，那麼我們需要在應用層處理（如上），
+            # 或者在資料庫中添加基於 normalized_name 的 constraint。
+            # 這裡我們維持應用層檢查，並在資料庫層面允許不同原始名稱的插入（雖然邏輯上我們視為重複）。
+            # 為了更嚴謹，我們可以只依賴應用層檢查，或者使用 ON CONFLICT DO NOTHING。
+            
             cur.execute(
-                "INSERT INTO reports (group_id, reporter_name, report_date, report_content) VALUES (%s, %s, %s, %s)",
+                """
+                INSERT INTO reports (group_id, reporter_name, report_date, report_content) 
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (group_id, reporter_name, report_date) 
+                DO UPDATE SET report_content = EXCLUDED.report_content, log_time = CURRENT_TIMESTAMP
+                """,
                 (group_id, reporter_name, r_date, content)
             )
             conn.commit()
@@ -312,6 +329,5 @@ def handle_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
-
 
 
