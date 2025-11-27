@@ -21,6 +21,7 @@ try:
 except:
     sys.exit(1)
 
+# 姓名正規化 (與 app.py 一致)
 def normalize_name(name):
     return re.sub(r'^\s*[（(\[【][^()\[\]]{1,10}[)）\]】]\s*', '', name).strip()
 
@@ -31,23 +32,12 @@ def get_db():
         return None
 
 def check_reminders(days_ago=1):
-    """
-    days_ago=1: 檢查昨天 (補交提醒)
-    days_ago=0: 檢查今天 (當日提醒)
-    """
     conn = get_db()
     if not conn: return
 
     try:
         cur = conn.cursor()
-        # 1. 檢查全域暫停
-        cur.execute("SELECT value FROM settings WHERE key = 'is_paused'")
-        res = cur.fetchone()
-        if res and res[0] == 'true':
-            print("INFO: Scheduler PAUSED.", file=sys.stderr)
-            return
-
-        # 日期設定 (UTC+8)
+        # 設定日期 (UTC+8)
         now_tst = datetime.utcnow() + timedelta(hours=8)
         target_date = (now_tst - timedelta(days=days_ago)).date()
         target_str = target_date.strftime('%Y.%m.%d')
@@ -57,27 +47,28 @@ def check_reminders(days_ago=1):
 
         print(f"--- Checking {target_str} ({day_label}) ---", file=sys.stderr)
 
-        cur.execute("SELECT DISTINCT group_id FROM reporters")
+        # 取得所有群組
+        cur.execute("SELECT DISTINCT group_id FROM group_vips")
         groups = [r[0] for r in cur.fetchall()]
 
         for gid in groups:
             if gid in EXCLUDE_IDS: continue
 
-            # 應交名單
-            cur.execute("SELECT reporter_name FROM reporters WHERE group_id = %s", (gid,))
-            all_raw = [r[0] for r in cur.fetchall()]
-            all_norm = {normalize_name(n) for n in all_raw}
+            # 應交名單 (正規化後)
+            cur.execute("SELECT normalized_name FROM group_vips WHERE group_id = %s", (gid,))
+            all_norm = {row[0] for row in cur.fetchall()}
 
-            # 已交名單
-            cur.execute("SELECT reporter_name FROM reports WHERE group_id = %s AND report_date = %s", (gid, target_date))
-            done_raw = [r[0] for r in cur.fetchall()]
-            done_norm = {normalize_name(n) for n in done_raw}
+            # 已交名單 (正規化後)
+            cur.execute("SELECT normalized_name FROM reports WHERE group_id = %s AND report_date = %s", (gid, target_date))
+            done_norm = {row[0] for row in cur.fetchall()}
 
-            # 未交
-            missing = sorted(list(all_norm - done_norm))
+            # 找出未交 (比對正規化名稱)
+            missing_norm = sorted(list(all_norm - done_norm))
 
-            if missing:
-                names = "\n".join([f"- {n}" for n in missing])
+            if missing_norm:
+                # 為了顯示友善，我們嘗試找回原始名稱 (可選，或直接顯示正規化名稱)
+                # 這裡簡單直接顯示正規化名稱，通常足夠辨識
+                names = "\n".join([f"- {n}" for n in missing_norm])
                 msg = (
                     f"📢 心得分享催繳大隊報到 📢\n"
                     f"日期: {target_str} ({day_label})\n\n"
