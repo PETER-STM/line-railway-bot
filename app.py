@@ -36,17 +36,16 @@ if GOOGLE_API_KEY:
             for m in genai.list_models():
                 if 'generateContent' in m.supported_generation_methods:
                     available_models.append(m.name)
-                    print(f"   - Found available model: {m.name}", file=sys.stderr)
         except Exception as e:
             print(f"   Error listing models (API Key issue?): {e}", file=sys.stderr)
 
-        # 2. 設定優先順序 (優先用新版 Flash，其次 Pro)
-        # 注意: list_models 回傳的名稱通常帶有 'models/' 前綴，例如 'models/gemini-1.5-flash'
+        # 2. 設定優先順序 (根據你的 Log 更新)
         priority_list = [
-            'models/gemini-1.5-flash', 
-            'models/gemini-1.5-pro', 
-            'models/gemini-pro', 
-            'models/gemini-1.0-pro'
+            'models/gemini-2.0-flash',       # 優先使用 2.0 Flash
+            'models/gemini-2.0-flash-lite',  # 備用輕量版
+            'models/gemini-2.5-pro-preview-03-25', # 你目前連到的強大模型
+            'models/gemini-1.5-flash',
+            'models/gemini-pro'
         ]
         
         selected_model_name = None
@@ -64,7 +63,7 @@ if GOOGLE_API_KEY:
 
         # 5. 初始化模型
         if selected_model_name:
-            # 建立模型物件 (移除 'models/' 前綴通常比較保險，雖然 SDK 支援兩種寫法)
+            # 建立模型物件
             clean_name = selected_model_name.replace('models/', '')
             model = genai.GenerativeModel(clean_name)
             print(f"✅ Gemini AI initialized using: {clean_name}", file=sys.stderr)
