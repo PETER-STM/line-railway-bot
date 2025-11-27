@@ -10,14 +10,14 @@ if not DATABASE_URL:
 
 def fix_database():
     print("Connecting to database...")
-    # 啟用 autocommit 模式，避免單一錯誤導致 "current transaction is aborted"
+    # 關鍵：啟用 autocommit，避免單一錯誤導致 "current transaction is aborted"
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     conn.autocommit = True 
     cur = conn.cursor()
     
     try:
-        # --- 1. 診斷與修復 group_vips 欄位 ---
-        print("Inspecting group_vips columns...")
+        # --- 1. 診斷並修正欄位名稱錯亂 ---
+        print("🔍 Inspecting group_vips columns...")
         
         # 查詢目前的欄位名稱
         cur.execute("""
@@ -26,30 +26,32 @@ def fix_database():
             WHERE table_name = 'group_vips';
         """)
         columns = [row[0] for row in cur.fetchall()]
-        print(f"Current columns found: {columns}")
+        print(f"   Current columns: {columns}")
 
-        # 情況 A: 發現舊名稱 normalized_vip_name，將其改名
+        # 狀況 A: 資料庫裡有 'normalized_vip_name' (錯誤名稱)，改名為 'normalized_name'
         if 'normalized_vip_name' in columns and 'normalized_name' not in columns:
-            print("🔄 Renaming column 'normalized_vip_name' to 'normalized_name'...")
+            print("🔄 Renaming wrong column 'normalized_vip_name' to 'normalized_name'...")
             cur.execute("ALTER TABLE group_vips RENAME COLUMN normalized_vip_name TO normalized_name;")
         
-        # 情況 B: 兩個都存在 (可能是重複建立)，刪除舊的
+        # 狀況 B: 兩個都存在 (可能是重複建立)，刪除錯誤的那個
         elif 'normalized_vip_name' in columns and 'normalized_name' in columns:
             print("🗑️ Dropping redundant column 'normalized_vip_name'...")
             cur.execute("ALTER TABLE group_vips DROP COLUMN normalized_vip_name;")
 
-        # 情況 C: 都不存在，建立新的
-        else:
-            print("➕ Ensuring 'normalized_name' column exists...")
+        # 狀況 C: 正確欄位不存在，建立它
+        if 'normalized_name' not in columns and 'normalized_vip_name' not in columns:
+            print("➕ Creating 'normalized_name' column...")
             cur.execute("ALTER TABLE group_vips ADD COLUMN IF NOT EXISTS normalized_name TEXT DEFAULT '';")
 
-        # --- 2. 填補空值 (避免 NOT NULL 錯誤) ---
-        print("🔧 Backfilling empty normalized_name...")
+        # --- 2. 填補 NULL 值 (修復髒資料) ---
+        print("🔧 Fixing NULL values...")
+        # 將 NULL 的欄位填入 vip_name，避免 NOT NULL 錯誤
         cur.execute("UPDATE group_vips SET normalized_name = vip_name WHERE normalized_name IS NULL OR normalized_name = '';")
 
         # --- 3. 清理重複資料 (這是建立唯一索引的前提) ---
-        print("🧹 Cleaning up duplicates before creating index...")
+        print("🧹 Cleaning up duplicates...")
         # 保留 ID 最小的那筆，刪除其餘重複 (group_id + normalized_name 相同者)
+        # 這裡會刪除你的 (test, test, null, test) 重複項
         cur.execute("""
             DELETE FROM group_vips a USING group_vips b
             WHERE a.id > b.id 
@@ -88,11 +90,10 @@ def fix_database():
             );
         """)
 
-        print("✅ Database repair complete! You can now start the app.")
+        print("✅ Database repair complete! Please restart your app.")
         
     except Exception as e:
         print(f"❌ Error during repair: {e}")
-        # 因為開啟了 autocommit，不需要 rollback
     finally:
         conn.close()
 
