@@ -48,32 +48,31 @@ def fix_database():
 
         # --- 5. 處理 ID 與 Primary Key 衝突 (關鍵修正) ---
         
-        # A. 如果沒有 id 欄位，先加進去 (但先不設 PK)
+        # A. 如果沒有 id 欄位，先加進去 (但先不設 PK，這步就不會報錯了)
         if 'id' not in columns:
             print("➕ Adding 'id' column (without PK first)...")
             cur.execute("ALTER TABLE group_vips ADD COLUMN id SERIAL;")
 
-        # B. 強制移除現有的任何 Primary Key 約束
+        # B. 找出並移除現有的 Primary Key (可能是 group_id)
         print("🔓 Removing old Primary Key constraints...")
         cur.execute("""
-            DO $$
-            DECLARE r RECORD;
-            BEGIN
-                FOR r IN (
-                    SELECT constraint_name 
-                    FROM information_schema.table_constraints 
-                    WHERE table_name = 'group_vips' AND constraint_type = 'PRIMARY KEY'
-                ) LOOP
-                    EXECUTE 'ALTER TABLE group_vips DROP CONSTRAINT ' || quote_ident(r.constraint_name);
-                END LOOP;
-            END $$;
+            SELECT constraint_name 
+            FROM information_schema.table_constraints 
+            WHERE table_name = 'group_vips' AND constraint_type = 'PRIMARY KEY';
         """)
+        old_pks = cur.fetchall()
+        
+        for pk in old_pks:
+            pk_name = pk[0]
+            print(f"   -> Dropping old PK: {pk_name}")
+            cur.execute(f'ALTER TABLE group_vips DROP CONSTRAINT "{pk_name}";')
 
         # C. 將 id 設定為新的 Primary Key
         print("🔑 Setting 'id' as the new Primary Key...")
         try:
             cur.execute("ALTER TABLE group_vips ADD PRIMARY KEY (id);")
         except Exception as e:
+            # 如果 id 已經是 PK 了，這裡會報錯，我們可以忽略
             print(f"   (Info: id might already be PK, skipping: {e})")
 
         # --- 6. 重建唯一索引 ---
