@@ -10,19 +10,19 @@ if not DATABASE_URL:
 
 def fix_database():
     print("Connecting to database...")
-    # 啟用 autocommit 避免交易鎖死
+    # 啟用 autocommit
     conn = psycopg2.connect(DATABASE_URL, sslmode='require')
     conn.autocommit = True 
     cur = conn.cursor()
     
     try:
-        # --- 1. 檢查欄位 ---
+        # --- 1. 檢查目前欄位 ---
         print("🔍 Inspecting group_vips columns...")
         cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'group_vips';")
         columns = [row[0] for row in cur.fetchall()]
         print(f"   Current columns: {columns}")
 
-        # --- 2. 修正 normalized_name ---
+        # --- 2. 修正 normalized_name (欄位名稱) ---
         if 'normalized_vip_name' in columns and 'normalized_name' not in columns:
             print("🔄 Renaming 'normalized_vip_name' to 'normalized_name'...")
             cur.execute("ALTER TABLE group_vips RENAME COLUMN normalized_vip_name TO normalized_name;")
@@ -34,9 +34,8 @@ def fix_database():
         print("🔧 Fixing NULL values...")
         cur.execute("UPDATE group_vips SET normalized_name = vip_name WHERE normalized_name IS NULL OR normalized_name = '';")
 
-        # --- 4. 清理重複資料 (關鍵修正：使用 ctid) ---
-        print("🧹 Cleaning up duplicates using ctid (skipping id check)...")
-        # 這裡不使用 id，改用 ctid (物理位置)，保證不會報錯
+        # --- 4. 清理重複資料 (使用 ctid) ---
+        print("🧹 Cleaning up duplicates using ctid...")
         cur.execute("""
             DELETE FROM group_vips a
             WHERE a.ctid <> (
@@ -47,18 +46,43 @@ def fix_database():
             );
         """)
 
-        # --- 5. 補上 ID 欄位 (如果缺失) ---
+        # --- 5. 處理 ID 與 Primary Key 衝突 (關鍵修正) ---
+        
+        # A. 如果沒有 id 欄位，先加進去 (但先不設 PK)
         if 'id' not in columns:
-            print("➕ Adding missing 'id' Primary Key...")
-            cur.execute("ALTER TABLE group_vips ADD COLUMN id SERIAL PRIMARY KEY;")
+            print("➕ Adding 'id' column (without PK first)...")
+            cur.execute("ALTER TABLE group_vips ADD COLUMN id SERIAL;")
 
-        # --- 6. 重建索引 ---
+        # B. 強制移除現有的任何 Primary Key 約束
+        print("🔓 Removing old Primary Key constraints...")
+        cur.execute("""
+            DO $$
+            DECLARE r RECORD;
+            BEGIN
+                FOR r IN (
+                    SELECT constraint_name 
+                    FROM information_schema.table_constraints 
+                    WHERE table_name = 'group_vips' AND constraint_type = 'PRIMARY KEY'
+                ) LOOP
+                    EXECUTE 'ALTER TABLE group_vips DROP CONSTRAINT ' || quote_ident(r.constraint_name);
+                END LOOP;
+            END $$;
+        """)
+
+        # C. 將 id 設定為新的 Primary Key
+        print("🔑 Setting 'id' as the new Primary Key...")
+        try:
+            cur.execute("ALTER TABLE group_vips ADD PRIMARY KEY (id);")
+        except Exception as e:
+            print(f"   (Info: id might already be PK, skipping: {e})")
+
+        # --- 6. 重建唯一索引 ---
         print("🔒 Applying unique constraints...")
         try:
             cur.execute("DROP INDEX IF EXISTS idx_group_vips_unique;")
             cur.execute("ALTER TABLE group_vips DROP CONSTRAINT IF EXISTS group_vips_group_id_normalized_name_key;")
         except Exception:
-            pass # 忽略刪除失敗
+            pass
 
         cur.execute("""
             CREATE UNIQUE INDEX idx_group_vips_unique 
