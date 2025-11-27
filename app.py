@@ -1,6 +1,7 @@
 import os
 import sys
 import re
+import subprocess
 from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -8,6 +9,7 @@ from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, SourceGroup, SourceRoom, SourceUser
 import psycopg2
 import google.generativeai as genai
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # --- 環境變數設定 ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
@@ -21,13 +23,13 @@ EXCLUDE_GROUP_IDS = set(EXCLUDE_GROUP_IDS_STR.split(',')) if EXCLUDE_GROUP_IDS_S
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     sys.exit("Error: LINE Channel Token/Secret is missing!")
 
-# 初始化 AI (改用 gemini-pro 以確保相容性)
+# 初始化 AI (改用 gemini-1.5-flash，免費額度較高且速度快)
 model = None
 if GOOGLE_API_KEY:
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-pro') # 改回穩定版
-        print("INFO: Gemini AI (gemini-pro) initialized.", file=sys.stderr)
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        print("INFO: Gemini AI (gemini-1.5-flash) initialized.", file=sys.stderr)
     except Exception as e:
         print(f"WARNING: Gemini AI init failed: {e}", file=sys.stderr)
 
@@ -37,8 +39,8 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # --- 工具函式：姓名正規化 ---
 def normalize_name(name):
-    # 移除各種括號與內容，只留名字
     if not name: return ""
+    # 移除各種括號與內容，只留名字
     return re.sub(r'^\s*[（(\[【][^()\[\]]{1,10}[)）\]】]\s*', '', name).strip()
 
 # --- 資料庫連線 ---
@@ -86,14 +88,14 @@ def chat_with_ai(text):
         return response.text.strip()
     except Exception as e:
         print(f"AI ERROR: {e}", file=sys.stderr)
-        return "😵‍💫 AI 暫時無法回應 (API Error)。"
+        return "😵‍💫 AI 暫時無法回應 (請檢查 API Key 或配額)。"
 
 # --- 資料庫操作：名單管理 ---
 def manage_vip_list(group_id, vip_name, action):
     conn = get_db_connection()
     if not conn: return "💥 連線失敗。"
     
-    # 修正：過濾掉空名稱或奇怪的符號
+    # 簡單防呆
     if vip_name and (len(vip_name) < 1 or vip_name in ['(', '（']):
         return "❓ 請輸入有效的人名。"
 
@@ -118,7 +120,6 @@ def manage_vip_list(group_id, vip_name, action):
             elif action == 'LIST':
                 cur.execute("SELECT vip_name FROM group_vips WHERE group_id = %s ORDER BY vip_name", (group_id,))
                 vips = [row[0] for row in cur.fetchall()]
-                # 過濾掉錯誤資料 (例如只有括號的)
                 valid_vips = [v for v in vips if v and v not in ['（', '(', ' ']]
                 
                 if valid_vips:
@@ -134,7 +135,6 @@ def log_report(group_id, date_str, reporter_name, content):
     conn = get_db_connection()
     if not conn: return "💥 連線失敗。"
     
-    # 再次確認名字是否乾淨
     reporter_name = reporter_name.strip()
     if not reporter_name or reporter_name in ['（', '(']:
          return "⚠️ 名字解析失敗，請確認格式：YYYY.MM.DD (週X) 姓名"
@@ -221,19 +221,10 @@ def handle_message(event):
         elif first_line in ["查詢名單", "名單", "list"]:
             reply = manage_vip_list(group_id, None, 'LIST')
 
-        # 3. 回報匹配 (關鍵修正：支援全形括號，並抓取整行姓名)
-        # Regex 解釋:
-        # ^(\d{4}\.\d{2}\.\d{2})  -> 抓日期
-        # \s* -> 空白
-        # (?:[（(].*?[)）])?      -> (非必要) 抓週四、(四) 等，支援全形半形
-        # \s* -> 空白
-        # ([^\n]+)                -> 【關鍵】抓取這行剩下的所有字當作姓名
-        # ([\s\S]*)               -> 抓取剩下的全文當心得
+        # 3. 回報匹配 (regex 修正)
         match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s*(?:[（(].*?[)）])?\s*([^\n]+)([\s\S]*)", text, re.DOTALL)
-        
         if match_report:
             d_str = match_report.group(1)
-            # 名字去除前後空白
             name = match_report.group(2).strip()
             content = text
             if name: reply = log_report(group_id, d_str, name, content)
@@ -247,6 +238,18 @@ def handle_message(event):
             line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply))
         except Exception as e:
             print(f"REPLY ERROR: {e}", file=sys.stderr)
+
+# --- 定時排程: 每天晚上 10 點 (台灣時間) 自動催繳 ---
+def run_scheduler_job():
+    print("⏰ Running scheduled check...", file=sys.stderr)
+    # 呼叫 scheduler.py 檢查當天 (days-ago 0)
+    subprocess.run(["python", "scheduler.py", "--days-ago", "0"])
+
+# Railway 是 UTC 時間，台灣 22:00 = UTC 14:00
+scheduler = BackgroundScheduler()
+# 設定每天 UTC 14:00 執行 (可自行調整 hour)
+scheduler.add_job(run_scheduler_job, 'cron', hour=14, minute=0)
+scheduler.start()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
