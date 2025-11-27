@@ -23,7 +23,7 @@ EXCLUDE_GROUP_IDS = set(EXCLUDE_GROUP_IDS_STR.split(',')) if EXCLUDE_GROUP_IDS_S
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     sys.exit("Error: LINE Channel Token/Secret is missing!")
 
-# 初始化 AI (改用 gemini-1.5-flash，免費額度較高且速度快)
+# 初始化 AI (使用 gemini-1.5-flash)
 model = None
 if GOOGLE_API_KEY:
     try:
@@ -95,7 +95,6 @@ def manage_vip_list(group_id, vip_name, action):
     conn = get_db_connection()
     if not conn: return "💥 連線失敗。"
     
-    # 簡單防呆
     if vip_name and (len(vip_name) < 1 or vip_name in ['(', '（']):
         return "❓ 請輸入有效的人名。"
 
@@ -239,16 +238,26 @@ def handle_message(event):
         except Exception as e:
             print(f"REPLY ERROR: {e}", file=sys.stderr)
 
-# --- 定時排程: 每天晚上 10 點 (台灣時間) 自動催繳 ---
-def run_scheduler_job():
-    print("⏰ Running scheduled check...", file=sys.stderr)
-    # 呼叫 scheduler.py 檢查當天 (days-ago 0)
+# --- 定時排程 ---
+def run_daily_check():
+    # 任務 1: 每天晚上 10 點檢查「今天」的進度 (溫柔提醒)
+    print("⏰ Running daily check (Today)...", file=sys.stderr)
     subprocess.run(["python", "scheduler.py", "--days-ago", "0"])
 
-# Railway 是 UTC 時間
-# 設定為 UTC 17:55 (等於台灣時間 01:55)
+def run_makeup_check():
+    # 任務 2: 每天下午 1 點檢查「昨天」的缺交 (奧客模式)
+    print("⏰ Running makeup check (Yesterday)...", file=sys.stderr)
+    subprocess.run(["python", "scheduler.py", "--days-ago", "1"])
+
+# 初始化排程器
 scheduler = BackgroundScheduler()
-scheduler.add_job(run_scheduler_job, 'cron', hour=17, minute=55)
+
+# 設定 1: 台灣時間 22:00 (UTC 14:00) -> 檢查當日
+scheduler.add_job(run_daily_check, 'cron', hour=14, minute=0)
+
+# 設定 2: 台灣時間 13:00 (UTC 05:00) -> 補繳昨天的
+scheduler.add_job(run_makeup_check, 'cron', hour=5, minute=0)
+
 scheduler.start()
 
 if __name__ == "__main__":
