@@ -245,10 +245,10 @@ def run_scheduler_job():
     # 呼叫 scheduler.py 檢查當天 (days-ago 0)
     subprocess.run(["python", "scheduler.py", "--days-ago", "0"])
 
-# Railway 是 UTC 時間，台灣 22:00 = UTC 14:00
+# Railway 是 UTC 時間
+# 設定為 UTC 17:55 (等於台灣時間 01:55)
 scheduler = BackgroundScheduler()
-# 設定每天 UTC 14:00 執行 (可自行調整 hour)
-scheduler.add_job(run_scheduler_job, 'cron', hour=14, minute=0)
+scheduler.add_job(run_scheduler_job, 'cron', hour=17, minute=55)
 scheduler.start()
 
 if __name__ == "__main__":

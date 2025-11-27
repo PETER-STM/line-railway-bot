@@ -4,5 +4,5 @@ line-bot-sdk==2.0.1
 psycopg2-binary
 python-dateutil
 requests
-google-generativeai>=0.3.0
+google-generativeai>=0.8.0
 APScheduler
