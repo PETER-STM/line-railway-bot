@@ -1,10 +1,10 @@
 import os
 import sys
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
-from linebot.exceptions import InvalidSignatureError, LineBotApiError, LineBotApiError
+from linebot.exceptions import InvalidSignatureError, LineBotApiError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage, SourceGroup, SourceRoom, SourceUser
 import psycopg2
 import google.generativeai as genai
@@ -14,27 +14,22 @@ LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 DATABASE_URL = os.environ.get('DATABASE_URL')
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
-# 排除的群組ID列表
 EXCLUDE_GROUP_IDS_STR = os.environ.get('EXCLUDE_GROUP_IDS', '')
 EXCLUDE_GROUP_IDS = set(EXCLUDE_GROUP_IDS_STR.split(',')) if EXCLUDE_GROUP_IDS_STR else set()
 
 # --- 診斷與初始化 ---
-if not LINE_CHANNEL_ACCESS_TOKEN:
-    sys.exit("LINE_CHANNEL_ACCESS_TOKEN is missing!")
-if not LINE_CHANNEL_SECRET:
-    sys.exit("LINE_CHANNEL_SECRET is missing!")
+if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
+    sys.exit("Error: LINE Channel Token/Secret is missing!")
 
-# 初始化 AI (使用 gemini-1.5-flash)
+# 初始化 AI (改用 gemini-pro 以確保相容性)
 model = None
 if GOOGLE_API_KEY:
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        print("INFO: Gemini AI initialized.", file=sys.stderr)
+        model = genai.GenerativeModel('gemini-pro') # 改回穩定版
+        print("INFO: Gemini AI (gemini-pro) initialized.", file=sys.stderr)
     except Exception as e:
         print(f"WARNING: Gemini AI init failed: {e}", file=sys.stderr)
-else:
-    print("WARNING: GOOGLE_API_KEY not found. AI features disabled.", file=sys.stderr)
 
 app = Flask(__name__)
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
@@ -42,9 +37,8 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # --- 工具函式：姓名正規化 ---
 def normalize_name(name):
-    """
-    移除姓名中的前綴括號，例如 '(三) 浣熊' -> '浣熊'
-    """
+    # 移除各種括號與內容，只留名字
+    if not name: return ""
     return re.sub(r'^\s*[（(\[【][^()\[\]]{1,10}[)）\]】]\s*', '', name).strip()
 
 # --- 資料庫連線 ---
@@ -58,7 +52,7 @@ def get_db_connection():
 # --- AI 相關函式 ---
 def get_group_mode(group_id):
     conn = get_db_connection()
-    if not conn: return False # 預設關閉 AI
+    if not conn: return False
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT ai_mode FROM group_configs WHERE group_id = %s", (group_id,))
@@ -92,48 +86,45 @@ def chat_with_ai(text):
         return response.text.strip()
     except Exception as e:
         print(f"AI ERROR: {e}", file=sys.stderr)
-        return "😵‍💫 AI 腦袋打結了，請稍後再試。"
+        return "😵‍💫 AI 暫時無法回應 (API Error)。"
 
 # --- 資料庫操作：名單管理 ---
 def manage_vip_list(group_id, vip_name, action):
     conn = get_db_connection()
     if not conn: return "💥 連線失敗。"
     
+    # 修正：過濾掉空名稱或奇怪的符號
+    if vip_name and (len(vip_name) < 1 or vip_name in ['(', '（']):
+        return "❓ 請輸入有效的人名。"
+
     normalized = normalize_name(vip_name) if vip_name else None
     
     try:
         with conn.cursor() as cur:
             if action == 'ADD':
-                # 新增 VIP (儲存原始名與正規化名)
                 cur.execute("""
                     INSERT INTO group_vips (group_id, vip_name, normalized_name) 
                     VALUES (%s, %s, %s) 
                     ON CONFLICT (group_id, normalized_name) DO NOTHING
                 """, (group_id, vip_name, normalized))
-                if cur.rowcount > 0:
-                    conn.commit()
-                    return f"🎉 好嘞～ {vip_name} 已成功加入名單！"
-                return f"🤨 {vip_name} 早就在名單裡面了。"
+                conn.commit()
+                return f"🎉 {vip_name} 已加入名單！"
             
             elif action == 'DEL':
-                # 刪除 VIP (依據正規化名稱)
                 cur.execute("DELETE FROM group_vips WHERE group_id = %s AND normalized_name = %s", (group_id, normalized))
-                if cur.rowcount > 0:
-                    # 同步刪除歷史紀錄 (可選)
-                    # cur.execute("DELETE FROM reports WHERE group_id = %s AND normalized_name = %s", (group_id, normalized))
-                    conn.commit()
-                    return f"🗑️ {vip_name} 已從名單中移除。"
-                return f"❓ 名單裡根本沒有 {vip_name} 啊！"
+                conn.commit()
+                return f"🗑️ {vip_name} 已移除。"
 
             elif action == 'LIST':
-                # 列出名單
                 cur.execute("SELECT vip_name FROM group_vips WHERE group_id = %s ORDER BY vip_name", (group_id,))
                 vips = [row[0] for row in cur.fetchall()]
-                if vips:
-                    # 為了美觀，可以在這裡做去重顯示
-                    display_list = sorted(list(set(vips)))
+                # 過濾掉錯誤資料 (例如只有括號的)
+                valid_vips = [v for v in vips if v and v not in ['（', '(', ' ']]
+                
+                if valid_vips:
+                    display_list = sorted(list(set(valid_vips)))
                     list_str = "\n".join([f"🔸 {name}" for name in display_list])
-                    return f"📋 最新回報觀察名單如下：\n{list_str}\n\n（嗯，看起來大家都還活著。）"
+                    return f"📋 最新回報觀察名單：\n{list_str}\n\n（嗯，看起來大家都還活著。）"
                 return "📭 名單空空如也～"
     finally:
         conn.close()
@@ -143,35 +134,40 @@ def log_report(group_id, date_str, reporter_name, content):
     conn = get_db_connection()
     if not conn: return "💥 連線失敗。"
     
+    # 再次確認名字是否乾淨
+    reporter_name = reporter_name.strip()
+    if not reporter_name or reporter_name in ['（', '(']:
+         return "⚠️ 名字解析失敗，請確認格式：YYYY.MM.DD (週X) 姓名"
+
     normalized = normalize_name(reporter_name)
     
     try:
         r_date = datetime.strptime(date_str, '%Y.%m.%d').date()
         with conn.cursor() as cur:
-            # 1. 自動補名單 (如果不在 VIP 名單中，自動加入)
+            # 1. 自動補名單
             cur.execute("""
                 INSERT INTO group_vips (group_id, vip_name, normalized_name) 
                 VALUES (%s, %s, %s) 
                 ON CONFLICT (group_id, normalized_name) DO NOTHING
             """, (group_id, reporter_name, normalized))
             
-            # 2. 檢查是否重複 (使用正規化名稱比對當天紀錄)
+            # 2. 檢查重複
             cur.execute("""
                 SELECT reporter_name FROM reports 
                 WHERE group_id = %s AND report_date = %s AND normalized_name = %s
             """, (group_id, r_date, normalized))
             
             if cur.fetchone():
-                 return f"⚠️ {reporter_name} ({date_str}) 今天已經回報過了！\n\n別想靠重複交作業刷存在感，我看的很清楚 👀"
+                 return f"⚠️ {reporter_name} 今天已經回報過了！"
 
-            # 3. 寫入紀錄 (包含完整心得內容)
+            # 3. 寫入紀錄
             cur.execute("""
                 INSERT INTO reports (group_id, reporter_name, normalized_name, report_date, report_content) 
                 VALUES (%s, %s, %s, %s, %s)
             """, (group_id, reporter_name, normalized, r_date, content))
             
             conn.commit()
-            return f"👌 收到！{reporter_name} ({date_str}) 的心得已成功登入檔案。\n\n（今天有乖，給你一個隱形貼紙 ⭐）"
+            return f"👌 收到！{reporter_name} ({date_str}) 的心得已登入。\n（給你的乖寶寶貼紙 ⭐）"
             
     except ValueError:
         return "❌ 日期格式錯誤 (YYYY.MM.DD)。"
@@ -188,10 +184,8 @@ def callback():
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
-    except InvalidSignatureError:
+    except (InvalidSignatureError, LineBotApiError):
         abort(400)
-    except LineBotApiError:
-        abort(500)
     return 'OK'
 
 @handler.add(MessageEvent, message=TextMessage)
@@ -204,36 +198,47 @@ def handle_message(event):
     
     if not group_id or group_id in EXCLUDE_GROUP_IDS: return
 
-    # 預處理：全形轉半形
     processed_text = text.strip().replace('（', '(').replace('）', ')')
     first_line = processed_text.split('\n')[0].strip()
     reply = None
 
-    # 1. 系統指令
-    if first_line in ["指令", "幫助", "help"]:
-        reply = "🤖 **功能選單**\n\n📝 回報: `YYYY.MM.DD [姓名]`\n👥 管理: `新增人名`, `刪除人名`, `查詢名單`\n⚙️ AI: `開啟智能模式`, `關閉智能模式`"
+    # 1. 指令
+    if first_line.lower() in ["指令", "幫助", "help"]:
+        reply = "🤖 **功能選單**\n📝 回報: `YYYY.MM.DD [姓名]`\n👥 管理: `新增人名 [名]`, `刪除人名 [名]`, `查詢名單`\n⚙️ AI: `開啟智能模式`, `關閉智能模式`"
     elif first_line == "開啟智能模式": reply = set_group_mode(group_id, True)
     elif first_line == "關閉智能模式": reply = set_group_mode(group_id, False)
 
-    # 2. 回報與管理 (優先處理)
+    # 2. 回報與管理
     if not reply:
-        match_add = re.match(r"^新增人名[\s　]+(.+)$", first_line)
-        if match_add: reply = manage_vip_list(group_id, match_add.group(1).strip(), 'ADD')
+        if first_line.startswith("新增人名"): 
+            name = first_line.replace("新增人名", "").strip()
+            if name: reply = manage_vip_list(group_id, name, 'ADD')
+        
+        elif first_line.startswith("刪除人名"):
+            name = first_line.replace("刪除人名", "").strip()
+            if name: reply = manage_vip_list(group_id, name, 'DEL')
 
-        match_del = re.match(r"^刪除人名[\s　]+(.+)$", first_line)
-        if match_del: reply = manage_vip_list(group_id, match_del.group(1).strip(), 'DEL')
-
-        if first_line in ["查詢名單", "查看人員", "名單", "list"]:
+        elif first_line in ["查詢名單", "名單", "list"]:
             reply = manage_vip_list(group_id, None, 'LIST')
 
-        # 回報匹配 (日期 + 姓名 + 任意內容)
-        match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s*(?:\(.*\))?\s*(.+?)\s*([\s\S]*)", text, re.DOTALL)
+        # 3. 回報匹配 (關鍵修正：支援全形括號，並抓取整行姓名)
+        # Regex 解釋:
+        # ^(\d{4}\.\d{2}\.\d{2})  -> 抓日期
+        # \s* -> 空白
+        # (?:[（(].*?[)）])?      -> (非必要) 抓週四、(四) 等，支援全形半形
+        # \s* -> 空白
+        # ([^\n]+)                -> 【關鍵】抓取這行剩下的所有字當作姓名
+        # ([\s\S]*)               -> 抓取剩下的全文當心得
+        match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s*(?:[（(].*?[)）])?\s*([^\n]+)([\s\S]*)", text, re.DOTALL)
+        
         if match_report:
-            d_str, name = match_report.group(1), match_report.group(2).strip()
-            content = text # 使用完整訊息作為心得內容
+            d_str = match_report.group(1)
+            # 名字去除前後空白
+            name = match_report.group(2).strip()
+            content = text
             if name: reply = log_report(group_id, d_str, name, content)
 
-    # 3. AI 閒聊 (最後)
+    # 4. AI
     if not reply and get_group_mode(group_id):
         reply = chat_with_ai(text)
 
@@ -246,5 +251,3 @@ def handle_message(event):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
-
-
