@@ -13,13 +13,16 @@ def fix_database():
     cur = conn.cursor()
     
     try:
-        print("Adding report_content column...")
+        # 1. 確保 reports 表格有 report_content 欄位
+        print("Checking report_content column...")
         cur.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS report_content TEXT;")
         
-        print("Adding normalized_name column...")
+        # 2. 確保 reports 表格有 normalized_name 欄位
+        print("Checking normalized_name column...")
         cur.execute("ALTER TABLE reports ADD COLUMN IF NOT EXISTS normalized_name VARCHAR(100) NOT NULL DEFAULT '';")
         
-        print("Creating group_vips table...")
+        # 3. 確保 group_vips 表格存在
+        print("Creating group_vips table if not exists...")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS group_vips (
                 id SERIAL PRIMARY KEY,
@@ -31,7 +34,8 @@ def fix_database():
             );
         """)
         
-        print("Creating group_configs table...")
+        # 4. 確保 group_configs 表格存在 (用於 AI 模式)
+        print("Creating group_configs table if not exists...")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS group_configs (
                 group_id TEXT PRIMARY KEY,
