@@ -23,13 +23,54 @@ EXCLUDE_GROUP_IDS = set(EXCLUDE_GROUP_IDS_STR.split(',')) if EXCLUDE_GROUP_IDS_S
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     sys.exit("Error: LINE Channel Token/Secret is missing!")
 
-# 初始化 AI (退回 gemini-pro 以確保最高相容性)
+# --- 🧠 AI 初始化 (自動偵測可用模型) ---
 model = None
 if GOOGLE_API_KEY:
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-pro')
-        print("INFO: Gemini AI (gemini-pro) initialized.", file=sys.stderr)
+        print("🔍 Checking available Gemini models for this API Key...", file=sys.stderr)
+        
+        # 1. 取得所有支援文字生成的模型
+        available_models = []
+        try:
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    available_models.append(m.name)
+                    print(f"   - Found available model: {m.name}", file=sys.stderr)
+        except Exception as e:
+            print(f"   Error listing models (API Key issue?): {e}", file=sys.stderr)
+
+        # 2. 設定優先順序 (優先用新版 Flash，其次 Pro)
+        # 注意: list_models 回傳的名稱通常帶有 'models/' 前綴，例如 'models/gemini-1.5-flash'
+        priority_list = [
+            'models/gemini-1.5-flash', 
+            'models/gemini-1.5-pro', 
+            'models/gemini-pro', 
+            'models/gemini-1.0-pro'
+        ]
+        
+        selected_model_name = None
+        
+        # 3. 嘗試匹配
+        for p in priority_list:
+            if p in available_models:
+                selected_model_name = p
+                break
+        
+        # 4. 如果優先清單都沒中，就拿第一個能用的
+        if not selected_model_name and available_models:
+            selected_model_name = available_models[0]
+            print(f"⚠️ Preferred models not found, falling back to: {selected_model_name}", file=sys.stderr)
+
+        # 5. 初始化模型
+        if selected_model_name:
+            # 建立模型物件 (移除 'models/' 前綴通常比較保險，雖然 SDK 支援兩種寫法)
+            clean_name = selected_model_name.replace('models/', '')
+            model = genai.GenerativeModel(clean_name)
+            print(f"✅ Gemini AI initialized using: {clean_name}", file=sys.stderr)
+        else:
+            print("❌ FATAL: No text generation models found! Check your Google Cloud API settings.", file=sys.stderr)
+
     except Exception as e:
         print(f"WARNING: Gemini AI init failed: {e}", file=sys.stderr)
 
@@ -40,7 +81,6 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 # --- 工具函式：姓名正規化 ---
 def normalize_name(name):
     if not name: return ""
-    # 移除各種括號與內容，只留名字
     return re.sub(r'^\s*[（(\[【][^()\[\]]{1,10}[)）\]】]\s*', '', name).strip()
 
 # --- 資料庫連線 ---
@@ -81,21 +121,20 @@ def set_group_mode(group_id, mode):
         conn.close()
 
 def chat_with_ai(text):
-    if not model: return None
+    if not model: return "😵‍💫 AI 暫時無法使用 (找不到可用模型)。"
     try:
         prompt = f"你是一個幽默、有點毒舌但很樂於助人的團隊助理 Bot。請用繁體中文簡短回答：{text}"
         response = model.generate_content(prompt)
         return response.text.strip()
     except Exception as e:
         print(f"AI ERROR: {e}", file=sys.stderr)
-        return "😵‍💫 AI 暫時無法回應 (請檢查 API Key 或配額)。"
+        return "😵‍💫 AI 發生錯誤 (請檢查 Log)。"
 
 # --- 資料庫操作：名單管理 ---
 def manage_vip_list(group_id, vip_name, action):
     conn = get_db_connection()
     if not conn: return "💥 連線失敗。"
     
-    # 簡單防呆
     if vip_name and (len(vip_name) < 1 or vip_name in ['(', '（']):
         return "❓ 請輸入有效的人名。"
 
@@ -144,14 +183,12 @@ def log_report(group_id, date_str, reporter_name, content):
     try:
         r_date = datetime.strptime(date_str, '%Y.%m.%d').date()
         with conn.cursor() as cur:
-            # 1. 自動補名單
             cur.execute("""
                 INSERT INTO group_vips (group_id, vip_name, normalized_name) 
                 VALUES (%s, %s, %s) 
                 ON CONFLICT (group_id, normalized_name) DO NOTHING
             """, (group_id, reporter_name, normalized))
             
-            # 2. 檢查重複
             cur.execute("""
                 SELECT reporter_name FROM reports 
                 WHERE group_id = %s AND report_date = %s AND normalized_name = %s
@@ -160,7 +197,6 @@ def log_report(group_id, date_str, reporter_name, content):
             if cur.fetchone():
                  return f"⚠️ {reporter_name} 今天已經回報過了！"
 
-            # 3. 寫入紀錄
             cur.execute("""
                 INSERT INTO reports (group_id, reporter_name, normalized_name, report_date, report_content) 
                 VALUES (%s, %s, %s, %s, %s)
@@ -202,26 +238,21 @@ def handle_message(event):
     first_line = processed_text.split('\n')[0].strip()
     reply = None
 
-    # 1. 指令
     if first_line.lower() in ["指令", "幫助", "help"]:
         reply = "🤖 **功能選單**\n📝 回報: `YYYY.MM.DD [姓名]`\n👥 管理: `新增人名 [名]`, `刪除人名 [名]`, `查詢名單`\n⚙️ AI: `開啟智能模式`, `關閉智能模式`"
     elif first_line == "開啟智能模式": reply = set_group_mode(group_id, True)
     elif first_line == "關閉智能模式": reply = set_group_mode(group_id, False)
 
-    # 2. 回報與管理
     if not reply:
         if first_line.startswith("新增人名"): 
             name = first_line.replace("新增人名", "").strip()
             if name: reply = manage_vip_list(group_id, name, 'ADD')
-        
         elif first_line.startswith("刪除人名"):
             name = first_line.replace("刪除人名", "").strip()
             if name: reply = manage_vip_list(group_id, name, 'DEL')
-
         elif first_line in ["查詢名單", "名單", "list"]:
             reply = manage_vip_list(group_id, None, 'LIST')
-
-        # 3. 回報匹配 (regex 修正)
+        
         match_report = re.match(r"^(\d{4}\.\d{2}\.\d{2})\s*(?:[（(].*?[)）])?\s*([^\n]+)([\s\S]*)", text, re.DOTALL)
         if match_report:
             d_str = match_report.group(1)
@@ -229,7 +260,6 @@ def handle_message(event):
             content = text
             if name: reply = log_report(group_id, d_str, name, content)
 
-    # 4. AI
     if not reply and get_group_mode(group_id):
         reply = chat_with_ai(text)
 
@@ -241,24 +271,18 @@ def handle_message(event):
 
 # --- 定時排程 ---
 def run_daily_check():
-    # 任務 1: 每天晚上 10 點檢查「今天」的進度 (溫柔提醒)
     print("⏰ Running daily check (Today)...", file=sys.stderr)
     subprocess.run(["python", "scheduler.py", "--days-ago", "0"])
 
 def run_makeup_check():
-    # 任務 2: 每天下午 1 點檢查「昨天」的缺交 (奧客模式)
     print("⏰ Running makeup check (Yesterday)...", file=sys.stderr)
     subprocess.run(["python", "scheduler.py", "--days-ago", "1"])
 
-# 初始化排程器
 scheduler = BackgroundScheduler()
-
-# 設定 1: 台灣時間 22:00 (UTC 14:00) -> 檢查當日
+# 台灣時間 22:00 -> UTC 14:00 (溫柔提醒)
 scheduler.add_job(run_daily_check, 'cron', hour=14, minute=0)
-
-# 設定 2: 台灣時間 13:00 (UTC 05:00) -> 補繳昨天的
+# 台灣時間 13:00 -> UTC 05:00 (奧客催繳)
 scheduler.add_job(run_makeup_check, 'cron', hour=5, minute=0)
-
 scheduler.start()
 
 if __name__ == "__main__":
