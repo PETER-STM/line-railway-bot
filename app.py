@@ -23,13 +23,13 @@ EXCLUDE_GROUP_IDS = set(EXCLUDE_GROUP_IDS_STR.split(',')) if EXCLUDE_GROUP_IDS_S
 if not LINE_CHANNEL_ACCESS_TOKEN or not LINE_CHANNEL_SECRET:
     sys.exit("Error: LINE Channel Token/Secret is missing!")
 
-# 初始化 AI (使用 gemini-1.5-flash)
+# 初始化 AI (退回 gemini-pro 以確保最高相容性)
 model = None
 if GOOGLE_API_KEY:
     try:
         genai.configure(api_key=GOOGLE_API_KEY)
-        model = genai.GenerativeModel('gemini-1.5-flash')
-        print("INFO: Gemini AI (gemini-1.5-flash) initialized.", file=sys.stderr)
+        model = genai.GenerativeModel('gemini-pro')
+        print("INFO: Gemini AI (gemini-pro) initialized.", file=sys.stderr)
     except Exception as e:
         print(f"WARNING: Gemini AI init failed: {e}", file=sys.stderr)
 
@@ -95,6 +95,7 @@ def manage_vip_list(group_id, vip_name, action):
     conn = get_db_connection()
     if not conn: return "💥 連線失敗。"
     
+    # 簡單防呆
     if vip_name and (len(vip_name) < 1 or vip_name in ['(', '（']):
         return "❓ 請輸入有效的人名。"
 
