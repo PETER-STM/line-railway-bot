@@ -25,7 +25,7 @@ def get_db():
         print(f"DB Error: {e}", file=sys.stderr)
         return None
 
-def check_reminders(days_ago=0):
+def check_reminders(days_ago=0, target_group=None):
     conn = get_db()
     if not conn: return
 
@@ -42,11 +42,17 @@ def check_reminders(days_ago=0):
 
         print(f"--- Checking for Date: {target_str} ({day_label}) ---", file=sys.stderr)
 
-        cur.execute("SELECT DISTINCT group_id FROM group_vips")
-        groups = [r[0] for r in cur.fetchall()]
+        # 2. 決定檢查哪些群組
+        groups = []
+        if target_group:
+            print(f"🧪 TESTING MODE: Targeting ONLY group {target_group}", file=sys.stderr)
+            groups = [target_group]
+        else:
+            cur.execute("SELECT DISTINCT group_id FROM group_vips")
+            groups = [r[0] for r in cur.fetchall()]
 
         for gid in groups:
-            if gid in EXCLUDE_IDS: continue
+            if gid in EXCLUDE_IDS and gid != target_group: continue
 
             # A. 取得該群組的應回報名單
             cur.execute("SELECT vip_name, normalized_name FROM group_vips WHERE group_id = %s", (gid,))
@@ -80,6 +86,8 @@ def check_reminders(days_ago=0):
                     print(f"✅ Sent reminder to {gid}", file=sys.stderr)
                 except LineBotApiError as e:
                     print(f"❌ Push failed for {gid}: {e}", file=sys.stderr)
+            else:
+                if target_group: print(f"🎉 Test group {gid} is all clear!", file=sys.stderr)
 
     finally:
         conn.close()
@@ -87,5 +95,8 @@ def check_reminders(days_ago=0):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--days-ago', type=int, default=0)
+    parser.add_argument('--target-group', type=str, help="Only run for this specific Group ID")
     args = parser.parse_args()
-    check_reminders(args.days_ago)
+    check_reminders(args.days_ago, args.target_group)
+
+

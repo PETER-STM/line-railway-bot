@@ -17,8 +17,7 @@ def fix_database():
     try:
         print("🔍 Inspecting reports columns...")
         cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'reports';")
-        r_cols = [row[0] for row in cur.fetchall()]
-
+        r_cols = [row[0] for row in cur.fetchall()]\r\n
         if 'normalized_reporter_name' in r_cols and 'normalized_name' not in r_cols:
             print("🔄 Renaming 'normalized_reporter_name' to 'normalized_name'...")
             cur.execute("ALTER TABLE reports RENAME COLUMN normalized_reporter_name TO normalized_name;")
@@ -47,3 +46,6 @@ def fix_database():
 
 if __name__ == "__main__":
     fix_database()
+
+
+
