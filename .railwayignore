@@ -1,0 +1,18 @@
+# 忽略 Python 虛擬環境 (這是兇手!)
+venv/
+env/
+.venv/
+.env
+
+# 忽略快取檔
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 忽略 Git 紀錄
+.git/
+.gitignore
+
+# 忽略 VS Code 設定
+.vscode/
