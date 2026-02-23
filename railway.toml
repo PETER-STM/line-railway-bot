@@ -6,3 +6,8 @@ installCommand = "pip install --no-cache-dir --force-reinstall -r requirements.t
 healthcheckPath = "/"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
+
+# 🔥 這段是關鍵！沒有這段，布丁🍮就會殺死系統
+[deploy.env]
+PYTHONIOENCODING = "utf-8"
+LANG = "C.UTF-8"

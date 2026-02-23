@@ -1,5 +1,9 @@
 import os
 import random
+from dotenv import load_dotenv
+
+# 🔥 終極保險：在設定檔源頭強制讀取 .env，徹底消滅本地端變數抓不到的問題
+load_dotenv()
 
 class Config:
     LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')

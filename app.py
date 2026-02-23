@@ -3,7 +3,8 @@ import re
 import threading
 import pytz
 import os
-from datetime import datetime
+import random 
+from datetime import datetime, timedelta
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -17,310 +18,243 @@ import tasks as task_scheduler
 import utils 
 
 app = Flask(__name__)
+
+# 初始化資料庫結構
 init_db()
+
+def check_and_update_schema():
+    """
+    🔥 自動演化：確保資料庫欄位與最新 Agent 架構對齊
+    """
+    print("🧬 檢查資料庫演化狀態...", file=sys.stderr)
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # 檢查 group_vips 表格
+                cols_to_add = [
+                    ('meta_patterns', 'TEXT DEFAULT \'\''),
+                    ('diagnosis', 'TEXT DEFAULT \'\''),
+                    ('last_tactic', 'TEXT DEFAULT \'\''),
+                    ('cognitive_tier', 'TEXT DEFAULT \'L1\''),
+                    ('tier_confidence', 'FLOAT DEFAULT 0.0')
+                ]
+                for col, dtype in cols_to_add:
+                    cur.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name='group_vips' AND column_name='{col}'")
+                    if not cur.fetchone():
+                        cur.execute(f"ALTER TABLE group_vips ADD COLUMN {col} {dtype}")
+                        print(f"✅ [Schema Update] Added {col} to group_vips", file=sys.stderr)
+
+                # 檢查 reports 表格
+                report_cols = [
+                    ('diagnosis', 'TEXT DEFAULT \'\''),
+                    ('score', 'INT DEFAULT 0'),
+                    ('is_fragile', 'BOOLEAN DEFAULT FALSE'),
+                    ('cognitive_score', 'INT DEFAULT 0'),
+                    ('is_fake', 'BOOLEAN DEFAULT FALSE'),
+                    ('distortion', 'TEXT DEFAULT \'\'')
+                ]
+                for col, dtype in report_cols:
+                    cur.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name='reports' AND column_name='{col}'")
+                    if not cur.fetchone():
+                        cur.execute(f"ALTER TABLE reports ADD COLUMN {col} {dtype}")
+                        print(f"✅ [Schema Update] Added {col} to reports", file=sys.stderr)
+                        
+                # 建立貝氏推論戰術統計表
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS mab_stats (
+                        id SERIAL PRIMARY KEY,
+                        normalized_name VARCHAR(50) NOT NULL,
+                        tactic_key VARCHAR(50) NOT NULL,
+                        uses INT DEFAULT 0,
+                        successes INT DEFAULT 0,
+                        failures INT DEFAULT 0,
+                        UNIQUE(normalized_name, tactic_key)
+                    )
+                """)
+            conn.commit()
+    except Exception as e:
+        print(f"⚠️ Schema Update Check Failed: {e}", file=sys.stderr)
+
+# 執行自動遷移
+check_and_update_schema()
 
 line_bot_api = LineBotApi(Config.LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(Config.LINE_CHANNEL_SECRET)
 
-# 🔥 [Regex 終極修正版]
-REPORT_REGEX = re.compile(r'^(\d{4}[./-]?\d{1,2}[./-]?\d{1,2})\s*(?:[(（][^)）\n]*[)）])?\s*(.+)', re.DOTALL)
+# 解析日報標題的 Regex
+REPORT_HEADER_REGEX = re.compile(r'^(\d{4}[./-]\d{1,2}[./-]\d{1,2})\s*([^\n]+)', re.UNICODE)
 
-def run_async_ai_task(ai_func, *args):
-    try:
-        with get_db() as conn:
-            ai_func(conn, *args)
-    except Exception as e:
-        print(f"⚠️ Async Task Error: {e}", file=sys.stderr)
-
-def process_report(gid, uid, date_str, raw_name_line, content):
-    """
-    [核心重構 - 智慧自癒 + 異步存檔版]
-    1. 自動修復髒名字 (Auto-Healing)
-    2. 分離 DB 寫入與 AI 生成 (Phase 1, 2, 3)
-    """
-    name = utils.normalize_name(raw_name_line)
-    is_admin = uid in Config.ADMIN_USER_IDS
-    
-    try:
-        # 1. 解析日期
-        r_date = datetime.strptime(date_str.replace('.', '-').replace('/', '-'), '%Y-%m-%d').date()
-        
-        # [年份防呆]
-        now = datetime.now()
-        if now.month <= 3 and r_date.year == (now.year - 1) and r_date.month <= 3:
-            r_date = r_date.replace(year=now.year)
-
-        insight = utils.extract_insight(content)
-        
-        # 變數準備
-        history_context = "（無歷史資料）"
-        personality = ""
-        tr_data = {}
-        display_streak = 0
-
-        # 🔥 Phase 1: 資料庫寫入 (快速交易 + 自動修復)
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                # 2. 檢查/建立使用者資料 (智慧搜尋)
-                cur.execute("SELECT line_user_id, last_report_date, current_streak, normalized_name FROM group_vips WHERE group_id=%s AND normalized_name=%s", (gid, name))
-                row = cur.fetchone()
-
-                # 🌟【自動修復邏輯】找不到時，嘗試找髒名字 (Trim)
-                if not row:
-                    cur.execute("SELECT line_user_id, last_report_date, current_streak, normalized_name FROM group_vips WHERE group_id=%s AND TRIM(normalized_name)=%s", (gid, name))
-                    row = cur.fetchone()
-                    
-                    if row:
-                        dirty_name = row[3]
-                        print(f"🧹 Auto-Cleaning: Fixing dirty name '{dirty_name}' to '{name}'", file=sys.stderr)
-                        cur.execute("UPDATE group_vips SET normalized_name=%s WHERE group_id=%s AND normalized_name=%s", (name, gid, dirty_name))
-                        cur.execute("UPDATE reports SET normalized_name=%s WHERE group_id=%s AND normalized_name=%s", (name, gid, dirty_name))
-
-                last_date = None
-                current_streak = 0
-
-                if row:
-                    if row[0] and row[0] != uid and not is_admin:
-                        return f"⛔ 身份驗證失敗：{name} 已被其他裝置綁定。\n(請管理員使用「阿摩解鎖 {name}」)"
-                    last_date = row[1]
-                    current_streak = row[2] if row[2] else 0
-                    
-                    if not row[0]:
-                        cur.execute("UPDATE group_vips SET line_user_id=%s WHERE group_id=%s AND normalized_name=%s", (uid, gid, name))
-                else:
-                    cur.execute("INSERT INTO group_vips (group_id, vip_name, normalized_name, line_user_id, current_streak) VALUES (%s,%s,%s,%s, 0)", (gid, name, name, uid))
-                    current_streak = 0
-
-                # 3. [連擊邏輯]
-                new_streak = current_streak
-                update_vip_stats = False
-
-                if last_date is None:
-                    new_streak = 1
-                    update_vip_stats = True
-                elif r_date > last_date:
-                    diff = (r_date - last_date).days
-                    if diff == 1:
-                        new_streak += 1
-                    elif diff > 1:
-                        new_streak = 1
-                    update_vip_stats = True
-                else:
-                    update_vip_stats = False
-                
-                if update_vip_stats:
-                    cur.execute("UPDATE group_vips SET last_report_date=%s, current_streak=%s WHERE group_id=%s AND normalized_name=%s", (r_date, new_streak, gid, name))
-                    display_streak = new_streak
-                else:
-                    display_streak = current_streak
-
-                # 4. 寫入日報 (Upsert)
-                cur.execute("SELECT report_content FROM reports WHERE group_id=%s AND report_date=%s AND normalized_name=%s", (gid, r_date, name))
-                existing_report = cur.fetchone()
-
-                if existing_report:
-                    if content.strip() not in existing_report[0]:
-                        cur.execute("UPDATE reports SET report_content = report_content || %s WHERE group_id=%s AND report_date=%s AND normalized_name=%s", ("\n\n[補] " + content, gid, r_date, name))
-                else:
-                    cur.execute("INSERT INTO reports (group_id, reporter_name, normalized_name, report_date, report_content) VALUES (%s,%s,%s,%s,%s)", (gid, name, name, r_date, content))
-
-                # 5. 抓取資料給 AI
-                cur.execute("""
-                    SELECT report_date, report_content 
-                    FROM reports 
-                    WHERE group_id=%s AND normalized_name=%s 
-                    AND report_date < %s 
-                    ORDER BY report_date DESC LIMIT 5
-                """, (gid, name, r_date))
-                history_rows = cur.fetchall()
-                if history_rows:
-                    history_context = "\n".join([f"📅 {hr[0]}: {utils.extract_insight(hr[1])}" for hr in history_rows])
-
-                cur.execute("SELECT personality, tr_tag, tr_strategy, tr_incantation, cognitive_tier FROM group_vips WHERE group_id=%s AND normalized_name=%s", (gid, name))
-                v = cur.fetchone()
-                if v:
-                    personality = v[0] or ""
-                    tr_data = {'incantation': v[3], 'cognitive_tier': v[4] or 'L1'}
-        
-        # ❄️ Phase 2: AI 生成 (DB 連線已釋放，不卡頓)
-        ai_result = ai_service.generate_ai_reply(
-            "report_success", 
-            name=name, 
-            streak=display_streak, 
-            insight=insight,
-            full_report=content,
-            history_context=history_context, 
-            personality=personality,
-            tr_data=tr_data
-        )
-
-        # 🔥 Phase 3: 補寫入 AI 評分
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE reports 
-                    SET cognitive_score=%s, is_fake=%s, is_fragile=%s, distortion=%s
-                    WHERE group_id=%s AND normalized_name=%s AND report_date=%s
-                """, (ai_result.get('score', 0), ai_result.get('is_fake', False), ai_result.get('is_fragile', False), ai_result.get('distortion', ''), gid, name, r_date))
-
-        # 啟動非同步 AI 分析任務
-        threading.Thread(target=run_async_ai_task, args=(ai_service.analyze_peer_interaction, gid, name, content)).start()
-        threading.Thread(target=run_async_ai_task, args=(ai_service.evaluate_and_evolve_strategy, gid, name, insight, tr_data, display_streak)).start()
-        threading.Thread(target=run_async_ai_task, args=(ai_service.analyze_and_update_personality, gid, name, content, personality)).start()
-        
-        return f"【 📝 回報確認 】\n📅 {r_date}｜👤 {name}\n✨ 連續 {display_streak} 天\n━━━━━━━━━━━━━━\n{ai_result.get('text')}"
-
-    except Exception as e:
-        print(f"❌ Process Report Error: {e}", file=sys.stderr)
-        return f"💥 系統忙線：{e}"
+@app.route("/", methods=['GET'])
+def health_check():
+    return "OK V32.10 Matrix Agent Running", 200
 
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers.get('X-Line-Signature', '')
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
         abort(400)
+    except Exception as e:
+        print(f"Callback Error: {e}", file=sys.stderr)
+        abort(500)
     return 'OK'
-
-@app.route("/")
-def home():
-    return "Amor Bot V16.30 (Final Stable)", 200
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     msg = event.message.text.strip()
-    uid = event.source.user_id
-    gid = event.source.group_id if event.source.type == 'group' else None
-    is_admin = uid in Config.ADMIN_USER_IDS
+    group_id = event.source.group_id if hasattr(event.source, 'group_id') else event.source.user_id
 
-    if not gid and not is_admin:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🤖 阿摩目前只服務群組喔！請把我加入群組。"))
+    # --- 1. 指令模式 ---
+    if msg == "阿摩切換全開":
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO group_configs (group_id, ai_mode, mode_type) VALUES (%s, TRUE, 'full') ON CONFLICT (group_id) DO UPDATE SET ai_mode = TRUE, mode_type = 'full'", (group_id,))
+            conn.commit()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚙️ 模式：full (V32.10 矩陣搜救啟動)"))
+        return
+    elif msg == "阿摩切換精簡":
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO group_configs (group_id, ai_mode, mode_type) VALUES (%s, TRUE, 'simple') ON CONFLICT (group_id) DO UPDATE SET ai_mode = TRUE, mode_type = 'simple'", (group_id,))
+            conn.commit()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚙️ 模式：simple (僅紀錄)"))
         return
 
-    # 1. 日報處理
-    match = REPORT_REGEX.match(msg)
-    if match:
-        if not gid and not is_admin: return 
-        raw_name_line = match.group(2).split('\n')[0].strip()
-        reply_text = process_report(gid, uid, match.group(1), raw_name_line, msg)
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
-        return
+    # 檢查群組設定
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT ai_mode, mode_type FROM group_configs WHERE group_id=%s", (group_id,))
+            row = cur.fetchone()
+            ai_mode, mode_type = row if row else (False, 'simple')
 
-    # 2. 統計缺交 (年份防呆修正)
-    if msg.startswith("統計缺交") and gid:
-        try:
-            parts = msg.split()
-            if len(parts) != 3: raise ValueError
-            _, start_str, end_str = parts[0], parts[1], parts[2]
+    if not ai_mode: return
+
+    # --- 2. 統計指令 (🔥 資本家收割排版與日期壓縮) ---
+    if msg.startswith("統計缺交"):
+        parts = msg.split()
+        if len(parts) >= 3:
+            try:
+                s_date = datetime.strptime(parts[1], '%Y-%m-%d').date()
+                e_date = datetime.strptime(parts[2], '%Y-%m-%d').date()
+            except ValueError:
+                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="❌ 日期格式錯誤，請使用 YYYY-MM-DD"))
+                return
+                
+            missing_report, completed_list, _ = utils.calculate_missing_stats(group_id, s_date, e_date)
             
-            start_date = datetime.strptime(start_str.replace('.', '-').replace('/', '-'), '%Y-%m-%d').date()
-            end_date = datetime.strptime(end_str.replace('.', '-').replace('/', '-'), '%Y-%m-%d').date()
+            # 核心：連續日期壓縮演算法 (將 2/2, 2/3, 2/4 壓縮成 2/2-2/4)
+            def compress_dates(date_strs):
+                if not date_strs: return ""
+                dates = sorted([datetime.strptime(d, '%Y-%m-%d').date() for d in date_strs])
+                ranges = []
+                start = dates[0]
+                prev = dates[0]
+                
+                def fmt(d): return f"{d.month}/{d.day}"
+
+                for d in dates[1:]:
+                    if (d - prev).days == 1:
+                        prev = d
+                    else:
+                        if start == prev: ranges.append(fmt(start))
+                        else: ranges.append(f"{fmt(start)}-{fmt(prev)}")
+                        start = d
+                        prev = d
+                if start == prev: ranges.append(fmt(start))
+                else: ranges.append(f"{fmt(start)}-{fmt(prev)}")
+                return "、".join(ranges)
+
+            # 標題日期格式：保留 02/02 雙位數格式
+            s_fmt = s_date.strftime('%m/%d')
+            e_fmt = e_date.strftime('%m/%d')
             
-            # 🔥 [修正] 年份自動防呆
-            now = datetime.now()
-            if now.month <= 3 and start_date.year == (now.year - 1) and start_date.month <= 3:
-                start_date = start_date.replace(year=now.year)  
-            if now.month <= 3 and end_date.year == (now.year - 1) and end_date.month <= 3:
-                end_date = end_date.replace(year=now.year)
+            reply_text = f"📊 缺交統計 ({s_fmt} ~ {e_fmt})\n━━━━━━━━━━━━━━\n"
             
-            # 呼叫 utils
-            missing_data, status_msg = utils.calculate_missing_stats(gid, start_date, end_date)
-            
-            if missing_data:
-                total_fine = 0
-                detail_msg = ""
-                for name, dates in missing_data.items():
-                    fine = len(dates) * 100
-                    total_fine += fine
-                    detail_msg += f"❌ {name} (缺{len(dates)}天): {', '.join(dates)} | 💎 需扣 {fine} 點\n"
-                final_reply = f"📊 缺交統計 ({start_date} ~ {end_date})\n━━━━━━━━━━━━━━\n{detail_msg}━━━━━━━━━━━━━━\n💰 本期公費點數總計：{total_fine} 點\n😈 阿摩提示：感謝各位的懶惰，讓我又賺了一筆。"
+            # 處理全勤名單
+            if completed_list:
+                reply_text += f"✅ **全勤戰士 ({len(completed_list)}人)**：\n"
+                reply_text += "、".join(completed_list) + "\n"
+                reply_text += "━━━━━━━━━━━━━━\n"
+                
+            total_points = 0
+            # 處理缺交罰款名單
+            if missing_report:
+                for name, dates in missing_report.items():
+                    missing_count = len(dates)
+                    points = missing_count * 100
+                    total_points += points
+                    compressed = compress_dates(dates)
+                    reply_text += f"❌ {name} (缺{missing_count}次): {compressed} | 💎 需扣 {points} 點\n"
+                
+                reply_text += "━━━━━━━━━━━━━━\n"
+                reply_text += f"💰 本期公費點數總計：{total_points} 點\n"
+                reply_text += "😈 阿摩提示：感謝各位的懶惰，讓我又賺了一筆。"
             else:
-                final_reply = status_msg
-            
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=final_reply))
-        except ValueError:
-            line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚠️ 格式錯誤！\n正確格式：`統計缺交 2026-01-01 2026-01-05`"))
+                reply_text += "🎉 太神啦！這段時間全員全勤！沒人可以罰。\n"
+                reply_text += "😈 阿摩提示：可惡，這次沒賺到半毛錢。"
+
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
         return
 
-    # 3. 其他功能
-    if msg.lower() in ["幫助", "阿摩"]:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=Config.HELP_MENU_FULL if is_admin else Config.HELP_MENU_GROWTH))
-        return
+    # --- 3. 日報處理邏輯 ---
+    match = REPORT_HEADER_REGEX.match(msg)
+    if match:
+        raw_date_str = match.group(1).replace('/', '-').replace('.', '-')
+        raw_name = match.group(2).strip()
+        norm_name = utils.normalize_name(raw_name)
+        tw_tz = pytz.timezone('Asia/Taipei')
+        today_date = datetime.now(tw_tz).date()
+        
+        try:
+            report_date = datetime.strptime(raw_date_str, '%Y-%m-%d').date()
+        except: return
+        if report_date > today_date: return
 
-    if msg.startswith("阿摩切換") and gid:
-        mode = 'full' if "全開" in msg else 'growth' if "成長" in msg else 'simple'
-        with get_db() as conn:
-            with conn.cursor() as cur: 
-                cur.execute("INSERT INTO group_configs (group_id, mode_type, ai_mode) VALUES (%s, %s, TRUE) ON CONFLICT (group_id) DO UPDATE SET mode_type = %s, ai_mode = TRUE", (gid, mode, mode))
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"⚙️ 模式切換為：{mode}"))
-        return
-    
-    if is_admin and msg == "阿摩補跑排程":
-        threading.Thread(target=task_scheduler.check_reminders, args=('weekday_check',)).start()
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🚀 強制啟動：【平日結算】檢查中..."))
-        return
-
-    if is_admin and msg.startswith("阿摩解鎖"):
-        target_name = utils.normalize_name(msg.replace("阿摩解鎖", ""))
+        insight = utils.extract_insight(msg)
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("UPDATE group_vips SET line_user_id = NULL WHERE group_id=%s AND normalized_name=%s", (gid, target_name))
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🔓 已解除「{target_name}」鎖定"))
-        return
-    
-    if is_admin and msg.startswith("阿摩刪除成員"):
-        target_name = msg.replace("阿摩刪除成員", "").strip()
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DELETE FROM reports WHERE group_id=%s AND reporter_name LIKE %s", (gid, f"%{target_name}%"))
-                cur.execute("DELETE FROM group_vips WHERE group_id=%s AND vip_name LIKE %s", (gid, f"%{target_name}%"))
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"🗑️ 已刪除成員「{target_name}」"))
-        return
+                cur.execute("""
+                    INSERT INTO reports (group_id, reporter_name, normalized_name, report_date, report_content) 
+                    VALUES (%s, %s, %s, %s, %s) ON CONFLICT (group_id, normalized_name, report_date) 
+                    DO UPDATE SET report_content = EXCLUDED.report_content
+                    RETURNING id
+                """, (group_id, raw_name, norm_name, report_date, msg))
+                if not cur.fetchone(): return
 
-    if is_admin and msg.startswith("阿摩後台列表"):
-         with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT group_id, vip_name FROM group_vips ORDER BY group_id")
-                rows, g_dict = cur.fetchall(), {}
-                for r in rows:
-                    if r[0] not in g_dict: g_dict[r[0]] = []
-                    if len(g_dict[r[0]]) < 5: g_dict[r[0]].append(r[1])
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🌍 阿摩駐點\n" + "\n".join([f"\n📂 {utils.get_group_name(k)} ({k})\n成員: {','.join(v)}..." for k, v in g_dict.items()])))
-         return
+                cur.execute("SELECT last_report_date, current_streak, meta_patterns, diagnosis FROM group_vips WHERE group_id=%s AND normalized_name=%s", (group_id, norm_name))
+                vip_row = cur.fetchone()
+                if vip_row:
+                    last_date, streak, meta_patterns, diagnosis = vip_row
+                    new_streak = streak + 1 if last_date == report_date - timedelta(days=1) else (streak if last_date >= report_date else 1)
+                else:
+                    meta_patterns, diagnosis, new_streak = '', '', 1
 
-    if msg == "阿摩查標籤":
-        with get_db() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT personality, cognitive_tier FROM group_vips WHERE group_id=%s AND line_user_id=%s", (gid, uid))
-                row = cur.fetchone()
-                tags = row[0] if row and row[0] else "無標籤"
-                tier = row[1] if row and row[1] else "L1"
-                line_bot_api.reply_message(event.reply_token, TextSendMessage(text=f"👤 您的側寫：\n標籤：{tags}\n等級：{tier}"))
-        return
+                cur.execute("""
+                    INSERT INTO group_vips (group_id, vip_name, normalized_name, last_report_date, current_streak)
+                    VALUES (%s, %s, %s, %s, %s) ON CONFLICT (group_id, normalized_name) 
+                    DO UPDATE SET last_report_date = GREATEST(group_vips.last_report_date, EXCLUDED.last_report_date), current_streak = EXCLUDED.current_streak
+                """, (group_id, raw_name, norm_name, report_date, new_streak))
+            conn.commit()
 
-    if msg.startswith("阿摩教我"):
-        threading.Thread(target=lambda: line_bot_api.reply_message(
-            event.reply_token, 
-            TextSendMessage(text=ai_service.generate_ai_reply("sales_coach", question=msg[4:].strip(), name="夥伴")['text'])
-        )).start()
-        return
+        if mode_type == 'full':
+            ai_resp = ai_service.generate_ai_reply("report_success", full_report=msg, name=norm_name, personality=meta_patterns, last_diagnosis=diagnosis, group_id=group_id, normalized_name=norm_name)
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE reports SET diagnosis = %s, score = %s WHERE group_id=%s AND normalized_name=%s AND report_date=%s", (ai_resp.get('diagnosis',''), ai_resp.get('score',0), group_id, norm_name, report_date))
+                    cur.execute("UPDATE group_vips SET diagnosis = %s WHERE group_id=%s AND normalized_name=%s", (ai_resp.get('diagnosis',''), group_id, norm_name))
+                conn.commit()
+            line_bot_api.reply_message(event.reply_token, TextSendMessage(text=ai_resp['text']))
 
-    if "阿摩" in msg:
-        threading.Thread(target=lambda: line_bot_api.reply_message(
-            event.reply_token, 
-            TextSendMessage(text=ai_service.generate_ai_reply("chat_mode", user_msg=msg)['text'])
-        )).start()
-
+# --- 4. 排程系統 ---
 tw_tz = pytz.timezone('Asia/Taipei')
 scheduler = BackgroundScheduler(timezone=tw_tz)
 scheduler.add_job(task_scheduler.check_reminders, CronTrigger(day_of_week='sat', hour=4, minute=0), args=['weekday_check'], id='weekday_check', replace_existing=True)
 scheduler.add_job(task_scheduler.check_reminders, CronTrigger(day_of_week='mon', hour=4, minute=0), args=['weekend_check'], id='weekend_check', replace_existing=True)
-
-if not scheduler.running:
-    scheduler.start()
+scheduler.add_job(task_scheduler.check_curfew_sweeper, CronTrigger(hour=23, minute=0), id='curfew_sweep', replace_existing=True)
+scheduler.add_job(task_scheduler.run_system_evolution, CronTrigger(day_of_week='sun', hour=2, minute=0), id='system_evolution', replace_existing=True)
+scheduler.start()
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host="0.0.0.0", port=Config.PORT)

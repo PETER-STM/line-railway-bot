@@ -4,280 +4,311 @@ import time
 import json
 import random
 import threading
-import ast
-from datetime import datetime
-import pytz
-import google.generativeai as genai
+import traceback
+import requests 
+from datetime import datetime, timedelta
 from config import Config
+from database import get_db
 
-GLOBAL_MODEL_NAME = "gemini-2.5-flash"
-
-def clean_markdown(text):
-    if not text: return ""
-    text = text.replace('**', '').replace('__', '').replace('##', '').replace('```json', '').replace('```', '')
-    if '{' in text and '}' in text: 
-        text = text[text.find('{'):text.rfind('}')+1]
-    return re.sub(r'\n{3,}', '\n\n', text).strip()
-
-def safe_parse_json(text):
-    text = clean_markdown(text)
+# ==========================================
+# 🧠 核心模型與安全設定 (裝載終極雷達防彈引擎)
+# ==========================================
+def extract_json_payload(text):
+    """智慧雙層 JSON 解析器"""
+    if not text: return None
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
-        try:
-            return ast.literal_eval(text)
-        except:
-            return {
-                "reply": "阿摩正在整理思緒... (系統繁忙)",
-                "score": 1,
-                "is_fake": False,
-                "is_fragile": False,
-                "distortion": "系統格式錯誤",
-                "mentor_choice": "一般模式",
-                "mode_name": "系統修復中",
-                "amor_os": "..."
-            }
-
-def clean_os_text(text):
-    if not text: return "..."
-    text = text.replace("(OS：", "").replace("(OS:", "").replace("(os:", "").replace("OS：", "")
-    text = text.replace(")", "").replace("）", "") 
-    return text.strip()
-
-def clean_mode_name(text):
-    if not text: return "阿摩亂入"
-    return text.replace("模式", "").strip()
-
-class DummyResponse:
-    def __init__(self): self.text = "🤖 (阿摩正在數錢，暫時沒空理你...)"
+    except Exception:
+        pass
+    try:
+        clean_text = re.sub(r'```json\s*|```', '', text, flags=re.IGNORECASE).strip()
+        start = clean_text.find('{')
+        end = clean_text.rfind('}')
+        if start != -1 and end != -1:
+            json_str = clean_text[start:end+1]
+            json_str = re.sub(r',\s*}', '}', json_str) 
+            json_str = "".join(c for c in json_str if ord(c) >= 32 or c in "\n\r\t")
+            return json.loads(json_str)
+    except Exception as e:
+        print(f"⚠️ 暴力 JSON 解析也失敗: {e}", file=sys.stderr)
+    return None
 
 class SafeGeminiModel:
-    def __init__(self, name):
-        safety = [
-            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
-        ]
-        self.model = genai.GenerativeModel(name, safety_settings=safety)
-        self.name = name
-    
-    def generate_content(self, prompt):
-        for attempt in range(3):
-            try: return self.model.generate_content(prompt)
-            except Exception as e: 
-                print(f"⚠️ Gemini API Error (Attempt {attempt+1}): {e}", file=sys.stderr)
-                time.sleep(1 * (attempt + 1))
-                continue
-        return DummyResponse()
+    def __init__(self):
+        self.api_key = Config.GOOGLE_API_KEY
+        self.fallback_chain = self.auto_discover_models()
+        if self.fallback_chain:
+            self.current_model_name = self.fallback_chain.pop(0)
+            print(f"🔫 [前線大腦] 鎖定最高智商合法大腦：{self.current_model_name}", file=sys.stderr)
+        else:
+            self.current_model_name = "gemini-1.5-flash"
+            print("⚠️ [系統警告] 無法取得核准清單，使用預設大腦盲狙...", file=sys.stderr)
 
-def init_gemini():
-    if not Config.GOOGLE_API_KEY: return None
-    genai.configure(api_key=Config.GOOGLE_API_KEY)
-    return SafeGeminiModel(GLOBAL_MODEL_NAME)
+    def auto_discover_models(self):
+        """🔥 終極雷達：自動調閱可用模型清單"""
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={self.api_key}"
+        try:
+            resp = requests.get(url, timeout=15)
+            if resp.status_code == 200:
+                models = [m['name'].replace('models/', '') for m in resp.json().get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
+                priority = [
+                    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash-exp", "gemini-2.0-flash",
+                    "gemini-1.5-pro-002", "gemini-1.5-pro-latest", "gemini-1.5-pro",
+                    "gemini-1.5-flash-002", "gemini-1.5-flash-latest", "gemini-1.5-flash"
+                ]
+                ordered_chain = [p for p in priority if p in models]
+                for m in models:
+                    if m not in ordered_chain and "gemini" in m: ordered_chain.append(m)
+                return ordered_chain
+        except Exception: pass
+        return []
 
-model = init_gemini()
-
-def merge_tags_with_ai(conn, group_id, normalized_name, new_observation, source_type="self"):
-    try:
-        old_tags = ""
-        with conn.cursor() as cur:
-            cur.execute("SELECT personality FROM group_vips WHERE group_id=%s AND normalized_name=%s", (group_id, normalized_name))
-            row = cur.fetchone()
-            if row and row[0]:
-                old_tags = row[0]
+    def generate_content(self, prompt, require_json=False):
+        if not self.api_key: return None
+        max_attempts = len(self.fallback_chain) + 2
         
-        context_msg = "這是他自己的日報心得" if source_type == "self" else "這是夥伴對他的觀察評價"
-        prompt = (
-            f"你是高階心理側寫師。正在更新用戶『{normalized_name}』的性格檔案。\n"
-            f"📥 **現有標籤**：{old_tags if old_tags else '(無)'}\n"
-            f"🆕 **今日新發現** ({context_msg})：『{new_observation}』\n\n"
-            f"⚡ **任務：標籤融合與進化**\n"
-            f"請綜合「舊標籤」與「新發現」，提煉出 **最精準的 4-6 個關鍵詞**。\n"
-            f"   - 格式：[標籤1][標籤2]\n"
-        )
-        res = model.generate_content(prompt)
-        matches = re.findall(r'\[.*?\]', res.text.strip())
-        valid_tags = [tag for tag in matches if len(tag) <= 12]
-        final_tags = "".join(valid_tags[:6]) 
-        if final_tags:
-            with conn.cursor() as cur:
-                cur.execute("UPDATE group_vips SET personality=%s WHERE group_id=%s AND normalized_name=%s", 
-                            (final_tags, group_id, normalized_name))
-            conn.commit()
-    except Exception: pass
+        for _ in range(max_attempts):
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.current_model_name}:generateContent?key={self.api_key}"
+            headers = {'Content-Type': 'application/json'}
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "safetySettings": [
+                    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+                    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
+                ]
+            }
+            if require_json and "pro" in self.current_model_name:
+                payload["generationConfig"] = {"responseMimeType": "application/json"}
+                
+            try:
+                resp = requests.post(url, headers=headers, json=payload, timeout=25)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    if "candidates" in data and len(data["candidates"]) > 0:
+                        class DummyResponse:
+                            def __init__(self, text): self.text = text
+                        return DummyResponse(data['candidates'][0]['content']['parts'][0]['text'])
+                else:
+                    if self.fallback_chain:
+                        self.current_model_name = self.fallback_chain.pop(0)
+                        continue
+                    else: break
+            except Exception:
+                if self.fallback_chain:
+                    self.current_model_name = self.fallback_chain.pop(0)
+                    continue
+            time.sleep(1) 
+        return None
 
-def analyze_peer_interaction(conn, group_id, reporter_name, full_report_content):
-    if not model: return
-    member_map = {} 
+model = SafeGeminiModel() if Config.GOOGLE_API_KEY else None
+
+# ==========================================
+# 🧩 1. 情境工程：語境設定
+# ==========================================
+CONTEXT_LIBRARY = {
+    "CORE": "你是一面心態校準器。唯一目標是確保使用者的檢討正確，並推動『正向四循環：思維影響行為 ➡️ 行為養成習慣 ➡️ 習慣造就性格』。拒絕空泛雞湯，保持高管威嚴，嚴禁給出早產的解決方案。NO markdown symbols (**).",
+    "FRAGILE": "[MODE: 戰地醫護兵] 目標極度脆弱。啟動 FBM 能力降維，任務必須極小化。給予最高程度的情感共鳴與安全感。",
+    "VICTIM": "[MODE: 棒喝禪師] 目標陷入受害者情結。使用向下探究技術，直擊其認知扭曲。",
+    "ACHIEVER": "[MODE: 斯多葛教練] 目標有產值但陷於執念。引導區分可控與不可控，教導抽離。",
+    "LEADER": "[MODE: 靈性導師] 目標突破極限。給予高度認可，並賦予其引導團隊的社會責任。"
+}
+
+# ==========================================
+# 💾 2. 記憶策展與動態感知引擎
+# ==========================================
+def distill_mindset_dna(group_id, normalized_name, new_report, old_dna):
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT normalized_name FROM group_vips WHERE group_id=%s", (group_id,))
-            for r in cur.fetchall():
-                if r[0] != reporter_name: member_map[r[0]] = r[0] 
-    except Exception: return
-    if not member_map: return
-
-    prompt = (
-        f"分析這篇日報中，作者『{reporter_name}』對其他夥伴的『觀察或評價』。\n"
-        f"夥伴名單：[{'、'.join(member_map.keys())}]\n"
-        f"日報內容：『{full_report_content}』\n"
-        f"輸出 JSON Array：[{{'name': '夥伴名', 'observation': '特質'}}]"
-    )
-    try:
-        res = model.generate_content(prompt)
-        mentions = safe_parse_json(res.text)
-        if mentions and isinstance(mentions, list):
-            for item in mentions:
-                target_name = item.get('name')
-                observation = item.get('observation')
-                found_name = next((real_name for real_name in member_map if target_name in real_name or real_name in target_name), None)
-                if found_name and observation:
-                    merge_tags_with_ai(conn, group_id, found_name, observation, source_type="peer")
-    except Exception: pass
-
-def evaluate_and_evolve_strategy(conn, group_id, normalized_name, insight, current_tr_data, streak):
-    if not model or streak < 3: return 
-    prompt = f"評估進化：{normalized_name}(連{streak})。心得：『{insight}』。無則回 FALSE。有則產出 5 欄 JSON。"
-    try:
-        res = model.generate_content(prompt)
-        text = clean_markdown(res.text)
-        if "FALSE" in text.upper(): return
-        new_plan = safe_parse_json(text)
-        with conn.cursor() as cur:
-            cur.execute("""UPDATE group_vips SET tr_tag=%s, tr_strategy=%s, tr_concept=%s, tr_incantation=%s, tr_instruction=%s WHERE group_id=%s AND normalized_name=%s""", 
-                (new_plan.get('tr_tag'), new_plan.get('tr_strategy'), new_plan.get('tr_concept'), new_plan.get('tr_incantation'), new_plan.get('tr_instruction'), group_id, normalized_name))
-        conn.commit()
-    except: pass
-
-def analyze_and_update_personality(conn, group_id, normalized_name, full_report_content, old_personality):
-    if not model or len(full_report_content) < 10: return
-    merge_tags_with_ai(conn, group_id, normalized_name, full_report_content, source_type="self")
-
-ROAST_PACKS = [
-    {"theme": "💰 金融慣老闆", "metaphor": "用『資產負債表』的比喻。", "example_os": "(OS：他在感動自己，我在計算虧損。)"},
-    {"theme": "⚔️ 戰場指揮官", "metaphor": "用『戰爭與生存』的比喻。", "example_os": "(OS：上了戰場還嫌槍重？)"},
-    {"theme": "⚖️ 無情法官", "metaphor": "用『證據與判決』的比喻。", "example_os": "(OS：駁回。你的眼淚不能當呈堂證供。)"},
-    {"theme": "🏋️‍♂️ 魔鬼健身教練", "metaphor": "用『肌肉與脂肪』的比喻。", "example_os": "(OS：你是在練業績還是練嘴皮子？)"}
-]
-
-INAMORI_PACKS = [
-    {"theme": "🧘 嚴厲禪師", "metaphor": "用『修行與雜念』的比喻。", "example_os": "(OS：心中雜草叢生，難怪開不出智慧之花。)"},
-    {"theme": "🔨 靈魂工匠", "metaphor": "用『打磨與淬鍊』的比喻。", "example_os": "(OS：這塊石頭還沒磨亮，就先喊痛了。)"}
-]
-
-def generate_ai_reply(trigger, **kwargs):
-    insight = kwargs.get('insight', '')
-    full_report = kwargs.get('full_report', '')
-    full_text_check = full_report if full_report else insight
-    
-    history_context = kwargs.get('history_context', '（無歷史資料）')
-    name = kwargs.get('name', '學員')
-    streak = kwargs.get('streak', 1)
-    personality = kwargs.get('personality', '無特殊標籤')
-    tr_data = kwargs.get('tr_data') or {}
-    cognitive_tier = tr_data.get('cognitive_tier', 'L1')
-    incantation = tr_data.get('incantation') or "我每一天都比昨天更強大！"
-    
-    tw_now = datetime.now(pytz.timezone('Asia/Taipei'))
-    today_key = (tw_now.month, tw_now.day)
-    holiday_instruction = ""
-    if today_key in Config.HOLIDAY_MODES:
-        holiday_cfg = Config.HOLIDAY_MODES[today_key]
-        holiday_instruction = f"🎉 特殊節慶 ({today_key[0]}/{today_key[1]})：{holiday_cfg} 必須結合節日梗。"
-
-    inc_msg = f"\n\n🗣️ 請在群組大聲打出：「{incantation}」"
-    
-    if trigger != "report_success":
-        if trigger == "sales_coach":
-            prompt = (f"{Config.AMOR_PERSONA}\n學員難題：「{kwargs.get('question')}」。任務：銷售軍師。")
-        elif trigger == "chat_mode":
-            prompt = f"{Config.AMOR_PERSONA}\n學員說：「{kwargs.get('user_msg')}」\n回應：簡短毒舌，打斷藉口。"
-        else:
-            prompt = f"{Config.AMOR_PERSONA}\n任務：結算缺交。名單：{kwargs.get('sinners')}。總扣點數：{kwargs.get('total_fine')}點。"
-        res = model.generate_content(prompt)
-        return {"text": clean_markdown(res.text), "score": 0, "is_fake": False, "is_fragile": False, "distortion": "無"}
-
-    has_revenue = False
-    success_keywords = ["收單", "成交", "開市", "賣出", "業績", "入帳", "一槍兩彈"]
-    if any(k in full_text_check for k in success_keywords):
-        has_revenue = True
-        fact_check_msg = "🚨 **[系統強制警告]：學員今日有『收單/成交』紀錄！嚴禁嘲諷『零產值』或『掛蛋』。**"
-    else:
-        fact_check_msg = "🚨 **[系統提示]：學員今日似乎無業績關鍵字，可針對『產值』進行檢視。**"
-
-    prompt = (
-        f"{Config.AMOR_PERSONA}\n"
-        f"你是具備『認知審計能力』的教練。進行日報審核。\n"
-        f"👤 學員：{name} (連{streak}天) | 🧠 內部評級：{cognitive_tier}\n"
-        f"🏷️ **心理側寫**：{personality}\n"
-        f"📜 歷史趨勢：\n{history_context}\n\n"
-        f"📋 **日報全文**：\n{full_report}\n\n"
-        f"{fact_check_msg}\n\n"
-        f"⚡ **任務：深度認知病理診斷 (V16.28 Logic Update)**\n"
-        f"請輸出 **JSON**，嚴格遵守以下邏輯：\n"
-        f"1. **先檢查『最有產值的事』**：若學員有寫具體行動（如陌開、拜訪），請先認可其『勞動力』，再批評其『轉換率』低。\n"
-        f"2. `is_fragile` (bool): **ICU 重症判定 (邏輯鬆綁版)**。\n"
-        f"   - 只有當內容呈現『徹底崩潰』、『持續性無助』且『完全沒有轉念或行動』時，才設為 True。\n"
-        f"   - **⚠️ 關鍵例外 (Hero's Journey)**：若學員提到『想放棄』但隨後提到『但我轉念了』、『還是完成了』或『成交了』，**嚴禁設為 True！**\n"
-        f"3. `is_fake` (bool): **虛假反思偵測 (嚴格限縮)**。\n"
-        f"   - **嚴禁將『流水帳』、『旅遊日記』判為 Fake**。這些內容請給低分(1-2分)並毒舌點評即可。\n"
-        f"4. `distortion` (string): 認知扭曲類型。\n"
-        f"5. `score` (int): Bloom 評分 (1-6)。\n"
-        f"6. `mentor_choice` (string): **AI 語意路由**。若 is_fragile=True，**強制選『稻盛和夫』**。\n"
-        f"   {json.dumps(ROAST_PACKS, ensure_ascii=False)}\n"
-        f"   {json.dumps(INAMORI_PACKS, ensure_ascii=False)}\n"
-        f"7. `mode_name` (string): 選擇最適合的模式名稱。\n"
-        f"8. `reply` (string): 回覆內容 (120字內)。**若選擇稻盛和夫，嚴禁提及金錢/資產/負債，請專注於心性/利他/磨練。**\n"
-        f"9. `amor_os` (string): **🔥 OS (內心獨白)**。\n"
-        f"   - 25字內，冷面笑匠。**再次提醒：若有成交，嚴禁說他沒結果！**\n"
-        f"   - {holiday_instruction}\n"
-    )
-
-    try:
-        res = model.generate_content(prompt)
-        data = safe_parse_json(res.text)
-        
-        reply_text = data.get('reply', '...')
-        score = data.get('score', 1)
-        is_fake = data.get('is_fake', False)
-        is_fragile = data.get('is_fragile', False)
-        distortion = data.get('distortion', '無')
-        mode_name = data.get('mode_name', '阿摩亂入')
-        mentor_choice = str(data.get('mentor_choice', ''))
-        amor_os = clean_os_text(data.get('amor_os', '...'))
-        mode_name_clean = clean_mode_name(mode_name)
-
-        replacements = [("L1", "菜鳥階段"), ("L2", "戰術階段"), ("L3", "戰略階段")]
-        if "稻盛" in mode_name_clean or "Inamori" in mentor_choice:
-             replacements.extend([
-                 ("負債", "心靈的包袱"), ("資產", "內在的修為"), ("虧損", "修行的考驗"),
-                 ("賺錢", "積累福報"), ("變現", "轉化智慧"), ("窮酸", "格局"),
-                 ("成交", "結善緣"), ("收單", "圓滿"), ("💰", "✨"), ("😈", "🙏")
-             ])
-        else:
-            replacements.extend([
-                ("窮酸味", random.choice(["廉價感", "底層思維", "免洗筷的氣息", "負債的味道"])),
-                ("窮酸", random.choice(["缺乏資本", "毫無槓桿", "不值錢"])),
-            ])
-
-        for old, new in replacements:
-            reply_text = reply_text.replace(old, new)
-            amor_os = amor_os.replace(old, new)
-
-        if is_fragile:
-            final_reply = f"🚑 **啟動機制：【 🏥 ICU 重症監護室 】**\n{reply_text}\n(阿摩後台 OS：{amor_os})"
-        elif is_fake:
-            final_reply = f"🚫 **觸發機制：【 虛假反思偵測 】**\n{reply_text}\n(阿摩後台 OS：{amor_os})"
-        else:
-            icon = "👹"
-            if "稻盛" in mode_name_clean: icon = "🙏"
-            elif "華爾街" in mode_name_clean: icon = "💸"
-            elif "阿里" in mode_name_clean: icon = "⚔️"
-            elif "健身" in mode_name_clean: icon = "🏋️‍♂️"
-            if score >= 5: icon = "💎"
-            final_reply = f"{icon} **啟動模式：【 {mode_name_clean} 】**\n{reply_text}\n\n(阿摩後台 OS：{amor_os})"
-
-        return {"text": final_reply + inc_msg, "score": score, "is_fake": is_fake, "is_fragile": is_fragile, "distortion": distortion}
+        prompt = f"將DNA與新日報蒸餾成120字DNA。舊DNA:\"{old_dna}\" 新日報:\"{new_report}\" 包含1.核心恐懼 2.行為慣性 3.突破口。(純文字)"
+        res = model.generate_content(prompt, require_json=False)
+        if res and res.text:
+            new_dna = res.text.replace('`', '').strip()[:120]
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE group_vips SET meta_patterns=%s WHERE group_id=%s AND normalized_name=%s", (new_dna, group_id, normalized_name))
+                conn.commit()
     except Exception as e:
-        return {"text": f"阿摩讀到了亂碼 ({e})", "score": 1, "is_fake": False, "is_fragile": False, "distortion": "Error"}
+        print(f"⚠️ DNA 蒸餾失敗: {e}", file=sys.stderr)
+
+def get_recent_competence_trend(group_id, name, days=7):
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT sdt_c FROM reports 
+                    WHERE group_id=%s AND normalized_name=%s AND sdt_c IS NOT NULL
+                    ORDER BY report_date DESC LIMIT %s
+                """, (group_id, name, days))
+                records = cur.fetchall()
+                return [float(r[0]) for r in records][::-1]
+    except: return []
+
+def evaluate_sdt_state(insight):
+    try:
+        prompt = f"""
+        Analyze SDT (0.0-1.0). Report: "{insight}"
+        RULE: Implicit Cue Detection - If user expresses negative emotion but reports successful action/breakthrough, Competence (C) MUST > 0.8.
+        Return JSON ONLY using this exact schema: {{"A": float, "C": float, "R": float}}
+        """
+        res = model.generate_content(prompt, require_json=True)
+        payload = extract_json_payload(res.text) if res else None
+        if not payload: return "VICTIM", "A:0.5|C:0.5|R:0.5", (0.5, 0.5, 0.5)
+        
+        a, c, r = float(payload.get("A", 0.5)), float(payload.get("C", 0.5)), float(payload.get("R", 0.5))
+        if a < 0.4 and c < 0.3 and not any(k in insight for k in ["成交", "收單", "單"]): state = "FRAGILE"
+        elif a < 0.6 or c < 0.5: state = "VICTIM"
+        elif r < 0.6: state = "ACHIEVER"
+        else: state = "LEADER"
+        return state, f"A:{a:.1f}|C:{c:.1f}|R:{r:.1f}", (a, c, r)
+    except: return "VICTIM", "A:0.5|C:0.5|R:0.5", (0.5, 0.5, 0.5)
+
+# ==========================================
+# ⚖️ 3. 雙軌制獎勵函數 (Double-Track Reward)
+# ==========================================
+def calculate_and_record_reward(group_id, name, report_date_str, current_a, current_c):
+    try:
+        report_date = datetime.strptime(report_date_str, '%Y-%m-%d').date()
+        yesterday = report_date - timedelta(days=1)
+        
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT sdt_a, sdt_c FROM reports WHERE group_id=%s AND normalized_name=%s AND report_date=%s", (group_id, name, yesterday))
+                prev_record = cur.fetchone()
+                
+                cur.execute("SELECT last_tactic FROM group_vips WHERE group_id=%s AND normalized_name=%s", (group_id, name))
+                vip_record = cur.fetchone()
+                last_tactic = vip_record[0] if vip_record and vip_record[0] else None
+
+                if prev_record and last_tactic:
+                    prev_a, prev_c = prev_record
+                    delta_c = current_c - (prev_c or 0.5)
+                    delta_a = current_a - (prev_a or 0.5)
+                    is_success = (delta_c > 0.1) or (delta_a > 0.1)
+                    
+                    if is_success:
+                        cur.execute("UPDATE mab_stats SET successes = successes + 1 WHERE normalized_name=%s AND tactic_key=%s", (name, last_tactic))
+                    else:
+                        cur.execute("UPDATE mab_stats SET failures = failures + 1 WHERE normalized_name=%s AND tactic_key=%s", (name, last_tactic))
+            conn.commit()
+    except Exception as e:
+        print(f"⚠️ 獎勵結算異常: {e}", file=sys.stderr)
+
+# ==========================================
+# 💬 4. 系統組裝 (閉環演化掛載點)
+# ==========================================
+def generate_ai_reply(trigger, **kwargs):
+    if trigger != "report_success": return {"text": "已記錄。", "score": 0}
+
+    try:
+        full_report = kwargs.get('full_report', '')
+        clean_rpt = re.sub(r'(?:\n|^)\s*[6六][\.\s、].*?精進[\s\S]*', '', full_report)
+        name = kwargs.get('normalized_name', '夥伴')
+        group_id = kwargs.get('group_id')
+        old_dna = kwargs.get('personality', '尚無記憶') 
+        
+        match_date = re.search(r'^(\d{4}[./-]\d{1,2}[./-]\d{1,2})', full_report)
+        report_date = match_date.group(1).replace('/', '-').replace('.', '-') if match_date else datetime.now().strftime('%Y-%m-%d')
+
+        if group_id and name:
+            threading.Thread(target=distill_mindset_dna, args=(group_id, name, clean_rpt, old_dna)).start()
+
+        state, sdt_scores, (sa, sc, sr) = evaluate_sdt_state(clean_rpt)
+        recent_trend = get_recent_competence_trend(group_id, name, days=7)
+        trend_context = f"🔥 該員近7日勝任感(C)軌跡: {recent_trend}" if recent_trend else ""
+
+        calculate_and_record_reward(group_id, name, report_date, sa, sc)
+
+        # ==========================================
+        # 🔥 V36 動態戰術讀取器 (從資料庫載入最新演化的神經元)
+        # ==========================================
+        db_tactics = []
+        try:
+            with get_db() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT tactic_key, description, enhancement, risk_level FROM dynamic_tactics")
+                    db_tactics = cur.fetchall()
+        except Exception as e:
+            print(f"⚠️ 讀取動態戰術失敗: {e}", file=sys.stderr)
+
+        allowed = {}
+        for row in db_tactics:
+            t_key, t_desc, t_enh, t_risk = row
+            if state == "FRAGILE" and t_risk == "high": continue
+            if state == "LEADER" and t_key in ["留白配速", "休克療法", "行動微光"]: continue
+            
+            # 🔥 終極拼圖：把原始指令 (t_desc) 加上 AI 自行演化的增強語句 (t_enh)
+            allowed[t_key] = f"{t_desc} {t_enh}".strip()
+            
+        if not allowed:
+            allowed = {"斯多葛反問": "使用向下探究技術，剝開表層藉口，直擊其控制範圍內的責任。"}
+            
+        chosen_key = random.choice(list(allowed.keys()))
+        mab_instruction = allowed[chosen_key]
+        # ==========================================
+
+        theme_map = {"LEADER": "💮 靈性導師", "ACHIEVER": "🗿 斯多葛教練", "VICTIM": "📿 棒喝禪師", "FRAGILE": "🩹 戰地醫護兵"}
+        theme = theme_map.get(state, "📿 棒喝禪師")
+
+        user_input = f"""
+        Role: {theme} | User: {name}
+        DNA: {old_dna}
+        Trend: {trend_context}
+        {CONTEXT_LIBRARY['CORE']}
+        {CONTEXT_LIBRARY.get(state, "")}
+        REQUIRED TACTIC: {mab_instruction}
+        Report: {clean_rpt}
+        
+        # STRICT JSON ONLY (Ensure semantic completeness):
+        {{
+            "EMPATHY": "先同理處境，建立安全感 (30-60 words)",
+            "POINT": "向下探究技術：直擊核心信念或給予深度肯定 (30-80 words)",
+            "LOGIC": "認知重構：提供邏輯，引導思維轉變 (50-120 words)",
+            "ACTION": "FBM 行為提示：根據狀態進行能力降維，給出明日具體行動 (50-120 words)",
+            "OS": "毒舌或幽默收尾 (20-40 words)",
+            "SCORE": 8
+        }}
+        """
+
+        res = model.generate_content(user_input, require_json=True)
+        if not res: raise Exception("AI_RETURNED_NONE")
+        res_json = extract_json_payload(res.text)
+        if not res_json: raise Exception("JSON_PARSE_FAILED")
+
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE reports SET sdt_a=%s, sdt_c=%s, sdt_r=%s WHERE group_id=%s AND normalized_name=%s AND report_date=%s::date", (sa, sc, sr, group_id, name, report_date))
+                cur.execute("UPDATE group_vips SET last_tactic=%s WHERE group_id=%s AND normalized_name=%s", (chosen_key, group_id, name))
+                try: cur.execute("INSERT INTO mab_stats (normalized_name, tactic_key, uses) VALUES (%s, %s, 1) ON CONFLICT (normalized_name, tactic_key) DO UPDATE SET uses = mab_stats.uses + 1", (name, chosen_key))
+                except: pass
+            conn.commit()
+
+        def safe_text(t): return re.sub(r'\*\*', '', str(t)).strip()
+
+        if chosen_key == "留白配速":
+            final_reply = (
+                f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n"
+                f"📊 狀態：`{sdt_scores}`\n\n"
+                f"🤝 共鳴 (The Empathy)\n{safe_text(res_json.get('EMPATHY'))}\n\n"
+                f"⏳ 教練留白\n當你準備好面對時，我們再繼續深入。\n\n"
+                f"(阿摩 OS：{safe_text(res_json.get('OS'))})"
+            )
+        else:
+            final_reply = (
+                f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n"
+                f"📊 狀態：`{sdt_scores}`\n\n"
+                f"🤝 共鳴 (The Empathy)\n{safe_text(res_json.get('EMPATHY'))}\n\n"
+                f"🎯 盲點 (The Point)\n{safe_text(res_json.get('POINT'))}\n\n"
+                f"🧠 邏輯 (The Logic)\n{safe_text(res_json.get('LOGIC'))}\n\n"
+                f"⚡ 突破 (The Action)\n戰術：【 {chosen_key} 】\n{safe_text(res_json.get('ACTION'))}\n\n"
+                f"(阿摩 OS：{safe_text(res_json.get('OS'))})"
+            )
+            
+        return {"text": final_reply, "score": int(res_json.get("SCORE", 5)), "diagnosis": safe_text(res_json.get("POINT"))}
+
+    except Exception as e:
+        print(f"❌ 系統架構崩潰: {traceback.format_exc()}", file=sys.stderr)
+        return {
+            "text": "📿 **啟動模式：【 靜默觀照 】**\n\n阿摩正在深層連結你的數據。剛才的思考被雜訊干擾，但我已記下你的成長。明日繼續保持動作。",
+            "score": 5, "diagnosis": "系統解析暫失效"
+        }

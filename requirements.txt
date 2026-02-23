@@ -3,5 +3,6 @@ line-bot-sdk
 gunicorn
 psycopg2-binary
 apscheduler
-google-generativeai
+requests
 pytz
+python-dotenv
