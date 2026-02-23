@@ -14,12 +14,9 @@ from database import get_db
 # 🧠 核心模型與安全設定 (裝載終極雷達防彈引擎)
 # ==========================================
 def extract_json_payload(text):
-    """智慧雙層 JSON 解析器"""
     if not text: return None
-    try:
-        return json.loads(text)
-    except Exception:
-        pass
+    try: return json.loads(text)
+    except Exception: pass
     try:
         clean_text = re.sub(r'```json\s*|```', '', text, flags=re.IGNORECASE).strip()
         start = clean_text.find('{')
@@ -45,7 +42,6 @@ class SafeGeminiModel:
             print("⚠️ [系統警告] 無法取得核准清單，使用預設大腦盲狙...", file=sys.stderr)
 
     def auto_discover_models(self):
-        """🔥 終極雷達：自動調閱可用模型清單"""
         url = f"https://generativelanguage.googleapis.com/v1beta/models?key={self.api_key}"
         try:
             resp = requests.get(url, timeout=15)
@@ -115,9 +111,6 @@ CONTEXT_LIBRARY = {
     "LEADER": "[MODE: 靈性導師] 目標突破極限。給予高度認可，並賦予其引導團隊的社會責任。"
 }
 
-# ==========================================
-# 💾 2. 記憶策展與動態感知引擎
-# ==========================================
 def distill_mindset_dna(group_id, normalized_name, new_report, old_dna):
     try:
         prompt = f"將DNA與新日報蒸餾成120字DNA。舊DNA:\"{old_dna}\" 新日報:\"{new_report}\" 包含1.核心恐懼 2.行為慣性 3.突破口。(純文字)"
@@ -144,24 +137,70 @@ def get_recent_competence_trend(group_id, name, days=7):
                 return [float(r[0]) for r in records][::-1]
     except: return []
 
+# ==========================================
+# 🔥 V39 混合式架構 (Neuro-symbolic AI) 評分引擎
+# 解決大模型「獎勵駭客(Reward Hacking)」與「傳統防呆誤殺」的終極方案
+# ==========================================
 def evaluate_sdt_state(insight):
     try:
         prompt = f"""
-        Analyze SDT (0.0-1.0). Report: "{insight}"
-        RULE: Implicit Cue Detection - If user expresses negative emotion but reports successful action/breakthrough, Competence (C) MUST > 0.8.
-        Return JSON ONLY using this exact schema: {{"A": float, "C": float, "R": float}}
+        你是一位嚴格但公允的企業高管。請根據以下日報評估 SDT 理論的三個維度 (0.0到1.0)。
+        
+        【階段一：AI 語意降維 (Semantic Dimensionality Reduction)】
+        請發揮你強大的語意理解能力，穿透學員的「情緒抒發、空泛感恩、心靈雞湯」，直接掃描是否有「具體的業務或工作行動」。
+        * 具體行動包含：收單、面試新人、處理客訴、開發客戶、會議執行、實體拜訪等。
+        * 只要有做具體的工作，不受「沒有賣出」、「無結果」等負面字眼干擾，`has_action` 就是 true。
+        * 只有當整篇日報全是心情日記，完全沒有交代任何物理動作時，`has_action` 才為 false。
+        
+        【階段二：SDT 嚴格打分】
+        0.5 是凡人基準線。
+        A (自主性): 0.4~0.5=被動或只做基本工作；0.7+=展現破局思維與強烈主動性。
+        C (勝任感): 0.4~0.5=普通執行或只靠運氣；0.7+=展現對業務的掌控、深刻覆盤或有亮眼成績。
+        R (關聯性): 0.4~0.5=表面客套；0.7+=為團隊付出、深度利他與領導力。
+        
+        日報內容: "{insight}"
+        
+        Return JSON ONLY using this exact schema: 
+        {{
+            "extracted_actions": "簡述具體動作(如: 面試新人、收單5單)，若無請填無",
+            "has_action": boolean,
+            "A": float,
+            "C": float,
+            "R": float
+        }}
         """
         res = model.generate_content(prompt, require_json=True)
         payload = extract_json_payload(res.text) if res else None
         if not payload: return "VICTIM", "A:0.5|C:0.5|R:0.5", (0.5, 0.5, 0.5)
         
+        actions = payload.get("extracted_actions", "無")
+        # 接收神經網路 (LLM) 降維後的客觀布林值
+        has_action = payload.get("has_action", True) 
         a, c, r = float(payload.get("A", 0.5)), float(payload.get("C", 0.5)), float(payload.get("R", 0.5))
-        if a < 0.4 and c < 0.3 and not any(k in insight for k in ["成交", "收單", "單"]): state = "FRAGILE"
-        elif a < 0.6 or c < 0.5: state = "VICTIM"
-        elif r < 0.6: state = "ACHIEVER"
-        else: state = "LEADER"
+        
+        # ----------------------------------------------------
+        # 【階段三：Python 剛性執法 (Rule-based Logic Gate)】
+        # 將底線防禦的生殺大權留在傳統程式碼，徹底粉碎「正能量話術」騙分數的企圖
+        # ----------------------------------------------------
+        if not has_action:
+            a = min(a, 0.5)
+            c = min(c, 0.5)
+            print(f"🔒 [Neuro-symbolic 執法] 偵測到獎勵駭客行為 (缺乏實質行動)。強制啟動硬上限鎖定！萃取動作: {actions}", file=sys.stderr)
+            
+        # 狀態判定邏輯
+        if a < 0.4 and c < 0.4 and not has_action: 
+            state = "FRAGILE"
+        elif a < 0.6 or c < 0.6: 
+            state = "VICTIM"
+        elif a >= 0.8 and c >= 0.8 and r >= 0.7: 
+            state = "LEADER"
+        else: 
+            state = "ACHIEVER"
+            
         return state, f"A:{a:.1f}|C:{c:.1f}|R:{r:.1f}", (a, c, r)
-    except: return "VICTIM", "A:0.5|C:0.5|R:0.5", (0.5, 0.5, 0.5)
+    except Exception as e: 
+        print(f"⚠️ 評分系統異常: {e}", file=sys.stderr)
+        return "VICTIM", "A:0.5|C:0.5|R:0.5", (0.5, 0.5, 0.5)
 
 # ==========================================
 # ⚖️ 3. 雙軌制獎勵函數 (Double-Track Reward)
@@ -219,9 +258,6 @@ def generate_ai_reply(trigger, **kwargs):
 
         calculate_and_record_reward(group_id, name, report_date, sa, sc)
 
-        # ==========================================
-        # 🔥 V36 動態戰術讀取器 (從資料庫載入最新演化的神經元)
-        # ==========================================
         db_tactics = []
         try:
             with get_db() as conn:
@@ -236,8 +272,6 @@ def generate_ai_reply(trigger, **kwargs):
             t_key, t_desc, t_enh, t_risk = row
             if state == "FRAGILE" and t_risk == "high": continue
             if state == "LEADER" and t_key in ["留白配速", "休克療法", "行動微光"]: continue
-            
-            # 🔥 終極拼圖：把原始指令 (t_desc) 加上 AI 自行演化的增強語句 (t_enh)
             allowed[t_key] = f"{t_desc} {t_enh}".strip()
             
         if not allowed:
@@ -245,7 +279,6 @@ def generate_ai_reply(trigger, **kwargs):
             
         chosen_key = random.choice(list(allowed.keys()))
         mab_instruction = allowed[chosen_key]
-        # ==========================================
 
         theme_map = {"LEADER": "💮 靈性導師", "ACHIEVER": "🗿 斯多葛教練", "VICTIM": "📿 棒喝禪師", "FRAGILE": "🩹 戰地醫護兵"}
         theme = theme_map.get(state, "📿 棒喝禪師")
