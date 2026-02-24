@@ -14,6 +14,7 @@ from database import get_db
 # 🧠 核心模型與安全設定 (裝載終極雷達防彈引擎)
 # ==========================================
 def extract_json_payload(text):
+    """智慧雙層 JSON 解析器"""
     if not text: return None
     try: return json.loads(text)
     except Exception: pass
@@ -56,6 +57,8 @@ class SafeGeminiModel:
                 for m in models:
                     if m not in ordered_chain and "gemini" in m: ordered_chain.append(m)
                 return ordered_chain
+            else:
+                print(f"⚠️ 取得模型失敗 ({resp.status_code}): {resp.text[:100]}", file=sys.stderr)
         except Exception: pass
         return []
 
@@ -87,11 +90,13 @@ class SafeGeminiModel:
                             def __init__(self, text): self.text = text
                         return DummyResponse(data['candidates'][0]['content']['parts'][0]['text'])
                 else:
+                    print(f"🚨 API 拒絕 ({resp.status_code}): {resp.text[:150]}", file=sys.stderr)
                     if self.fallback_chain:
                         self.current_model_name = self.fallback_chain.pop(0)
                         continue
                     else: break
-            except Exception:
+            except Exception as e:
+                print(f"🚨 連線例外: {e}", file=sys.stderr)
                 if self.fallback_chain:
                     self.current_model_name = self.fallback_chain.pop(0)
                     continue
@@ -121,48 +126,41 @@ def distill_mindset_dna(group_id, normalized_name, new_report, old_dna):
                 with conn.cursor() as cur:
                     cur.execute("UPDATE group_vips SET meta_patterns=%s WHERE group_id=%s AND normalized_name=%s", (new_dna, group_id, normalized_name))
                 conn.commit()
-    except Exception as e:
-        print(f"⚠️ DNA 蒸餾失敗: {e}", file=sys.stderr)
+    except Exception: pass
 
 def get_recent_competence_trend(group_id, name, days=7):
     try:
         with get_db() as conn:
             with conn.cursor() as cur:
-                cur.execute("""
-                    SELECT sdt_c FROM reports 
-                    WHERE group_id=%s AND normalized_name=%s AND sdt_c IS NOT NULL
-                    ORDER BY report_date DESC LIMIT %s
-                """, (group_id, name, days))
-                records = cur.fetchall()
-                return [float(r[0]) for r in records][::-1]
+                cur.execute("SELECT sdt_c FROM reports WHERE group_id=%s AND normalized_name=%s AND sdt_c IS NOT NULL ORDER BY report_date DESC LIMIT %s", (group_id, name, days))
+                return [float(r[0]) for r in cur.fetchall()][::-1]
     except: return []
 
 # ==========================================
-# 🔥 V39 混合式架構 (Neuro-symbolic AI) 評分引擎
-# 解決大模型「獎勵駭客(Reward Hacking)」與「傳統防呆誤殺」的終極方案
+# 🔥 V41 混合式架構 (Neuro-symbolic AI) 評分引擎
+# 極限收緊 R 分數，徹底根除「口頭感恩騙高分」
 # ==========================================
 def evaluate_sdt_state(insight):
     try:
         prompt = f"""
-        你是一位嚴格但公允的企業高管。請根據以下日報評估 SDT 理論的三個維度 (0.0到1.0)。
+        你是一位極度嚴格但公允的企業高管。請根據以下日報評估 SDT 理論的三個維度 (0.0到1.0)。
         
-        【階段一：AI 語意降維 (Semantic Dimensionality Reduction)】
-        請發揮你強大的語意理解能力，穿透學員的「情緒抒發、空泛感恩、心靈雞湯」，直接掃描是否有「具體的業務或工作行動」。
-        * 具體行動包含：收單、面試新人、處理客訴、開發客戶、會議執行、實體拜訪等。
-        * 只要有做具體的工作，不受「沒有賣出」、「無結果」等負面字眼干擾，`has_action` 就是 true。
-        * 只有當整篇日報全是心情日記，完全沒有交代任何物理動作時，`has_action` 才為 false。
+        【階段一：AI 語意降維】
+        過濾掉純粹的「情緒抒發、空泛感恩」，掃描是否有「具體的業務或工作行動」(如收單、面試、客訴處理、開發、實體會議)。
+        只要有做具體的物理工作，`has_action` 就是 true。
+        只有當整篇日報全是心情日記，完全沒有交代任何物理動作時，`has_action` 才為 false。
         
-        【階段二：SDT 嚴格打分】
+        【階段二：SDT 極限嚴格打分】
         0.5 是凡人基準線。
-        A (自主性): 0.4~0.5=被動或只做基本工作；0.7+=展現破局思維與強烈主動性。
-        C (勝任感): 0.4~0.5=普通執行或只靠運氣；0.7+=展現對業務的掌控、深刻覆盤或有亮眼成績。
-        R (關聯性): 0.4~0.5=表面客套；0.7+=為團隊付出、深度利他與領導力。
+        A (自主性): 0.4~0.5=被動或抱怨；0.7+=展現破局思維與強烈主動性。
+        C (勝任感): 0.4~0.5=普通執行或沒有賣出；0.7+=展現對業務的絕對掌控、深刻覆盤。
+        R (關聯性): 0.4~0.5=只有口頭/文字上的「感謝」或「感恩」(如:感謝客人、感謝天氣)；0.75+=必須有「實質的利他行動」或「實質領導力」(如:主動幫同事成交、實際指導新人、替團隊扛下責任)。
         
         日報內容: "{insight}"
         
         Return JSON ONLY using this exact schema: 
         {{
-            "extracted_actions": "簡述具體動作(如: 面試新人、收單5單)，若無請填無",
+            "extracted_actions": "簡述具體動作，若無請填無",
             "has_action": boolean,
             "A": float,
             "C": float,
@@ -170,37 +168,28 @@ def evaluate_sdt_state(insight):
         }}
         """
         res = model.generate_content(prompt, require_json=True)
-        payload = extract_json_payload(res.text) if res else None
-        if not payload: return "VICTIM", "A:0.5|C:0.5|R:0.5", (0.5, 0.5, 0.5)
+        if not res: return "API_ERROR", "A:0|C:0|R:0", (0.0, 0.0, 0.0)
+        
+        payload = extract_json_payload(res.text)
+        if not payload: return "API_ERROR", "A:0|C:0|R:0", (0.0, 0.0, 0.0)
         
         actions = payload.get("extracted_actions", "無")
-        # 接收神經網路 (LLM) 降維後的客觀布林值
         has_action = payload.get("has_action", True) 
         a, c, r = float(payload.get("A", 0.5)), float(payload.get("C", 0.5)), float(payload.get("R", 0.5))
         
-        # ----------------------------------------------------
-        # 【階段三：Python 剛性執法 (Rule-based Logic Gate)】
-        # 將底線防禦的生殺大權留在傳統程式碼，徹底粉碎「正能量話術」騙分數的企圖
-        # ----------------------------------------------------
         if not has_action:
-            a = min(a, 0.5)
-            c = min(c, 0.5)
-            print(f"🔒 [Neuro-symbolic 執法] 偵測到獎勵駭客行為 (缺乏實質行動)。強制啟動硬上限鎖定！萃取動作: {actions}", file=sys.stderr)
+            a, c = min(a, 0.5), min(c, 0.5)
+            print(f"🔒 [Neuro-symbolic 執法] 缺乏實質行動，啟動硬上限鎖定！動作: {actions}", file=sys.stderr)
             
-        # 狀態判定邏輯
-        if a < 0.4 and c < 0.4 and not has_action: 
-            state = "FRAGILE"
-        elif a < 0.6 or c < 0.6: 
-            state = "VICTIM"
-        elif a >= 0.8 and c >= 0.8 and r >= 0.7: 
-            state = "LEADER"
-        else: 
-            state = "ACHIEVER"
+        if a < 0.4 and c < 0.4 and not has_action: state = "FRAGILE"
+        elif a < 0.6 or c < 0.6: state = "VICTIM"
+        elif a >= 0.8 and c >= 0.8 and r >= 0.7: state = "LEADER"
+        else: state = "ACHIEVER"
             
         return state, f"A:{a:.1f}|C:{c:.1f}|R:{r:.1f}", (a, c, r)
     except Exception as e: 
         print(f"⚠️ 評分系統異常: {e}", file=sys.stderr)
-        return "VICTIM", "A:0.5|C:0.5|R:0.5", (0.5, 0.5, 0.5)
+        return "API_ERROR", "A:0|C:0|R:0", (0.0, 0.0, 0.0)
 
 # ==========================================
 # ⚖️ 3. 雙軌制獎勵函數 (Double-Track Reward)
@@ -209,29 +198,21 @@ def calculate_and_record_reward(group_id, name, report_date_str, current_a, curr
     try:
         report_date = datetime.strptime(report_date_str, '%Y-%m-%d').date()
         yesterday = report_date - timedelta(days=1)
-        
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT sdt_a, sdt_c FROM reports WHERE group_id=%s AND normalized_name=%s AND report_date=%s", (group_id, name, yesterday))
                 prev_record = cur.fetchone()
-                
                 cur.execute("SELECT last_tactic FROM group_vips WHERE group_id=%s AND normalized_name=%s", (group_id, name))
                 vip_record = cur.fetchone()
                 last_tactic = vip_record[0] if vip_record and vip_record[0] else None
 
                 if prev_record and last_tactic:
                     prev_a, prev_c = prev_record
-                    delta_c = current_c - (prev_c or 0.5)
-                    delta_a = current_a - (prev_a or 0.5)
-                    is_success = (delta_c > 0.1) or (delta_a > 0.1)
-                    
-                    if is_success:
-                        cur.execute("UPDATE mab_stats SET successes = successes + 1 WHERE normalized_name=%s AND tactic_key=%s", (name, last_tactic))
-                    else:
-                        cur.execute("UPDATE mab_stats SET failures = failures + 1 WHERE normalized_name=%s AND tactic_key=%s", (name, last_tactic))
+                    is_success = (current_c - (prev_c or 0.5) > 0.1) or (current_a - (prev_a or 0.5) > 0.1)
+                    if is_success: cur.execute("UPDATE mab_stats SET successes = successes + 1 WHERE normalized_name=%s AND tactic_key=%s", (name, last_tactic))
+                    else: cur.execute("UPDATE mab_stats SET failures = failures + 1 WHERE normalized_name=%s AND tactic_key=%s", (name, last_tactic))
             conn.commit()
-    except Exception as e:
-        print(f"⚠️ 獎勵結算異常: {e}", file=sys.stderr)
+    except Exception: pass
 
 # ==========================================
 # 💬 4. 系統組裝 (閉環演化掛載點)
@@ -252,10 +233,19 @@ def generate_ai_reply(trigger, **kwargs):
         if group_id and name:
             threading.Thread(target=distill_mindset_dna, args=(group_id, name, clean_rpt, old_dna)).start()
 
+        # 第一階段：極限嚴格打分
         state, sdt_scores, (sa, sc, sr) = evaluate_sdt_state(clean_rpt)
+        
+        # 🔥 V41: Fast-Fail 斷路器
+        # 如果打分階段就已經被 Google 阻擋，直接回傳靜默，不再呼叫第二次浪費額度
+        if state == "API_ERROR":
+            return {
+                "text": "📿 **啟動模式：【 靜默觀照 】**\n\n阿摩正在深層連結你的數據。剛才的思考被雜訊干擾，但我已記下你的成長。",
+                "score": 5, "diagnosis": "API 額度耗盡或連線失敗"
+            }
+
         recent_trend = get_recent_competence_trend(group_id, name, days=7)
         trend_context = f"🔥 該員近7日勝任感(C)軌跡: {recent_trend}" if recent_trend else ""
-
         calculate_and_record_reward(group_id, name, report_date, sa, sc)
 
         db_tactics = []
@@ -264,25 +254,24 @@ def generate_ai_reply(trigger, **kwargs):
                 with conn.cursor() as cur:
                     cur.execute("SELECT tactic_key, description, enhancement, risk_level FROM dynamic_tactics")
                     db_tactics = cur.fetchall()
-        except Exception as e:
-            print(f"⚠️ 讀取動態戰術失敗: {e}", file=sys.stderr)
+        except: pass
 
         allowed = {}
         for row in db_tactics:
             t_key, t_desc, t_enh, t_risk = row
             if state == "FRAGILE" and t_risk == "high": continue
+            # 🔥 V41 鐵律防呆：LEADER 絕對不能使用這三個消極戰術
             if state == "LEADER" and t_key in ["留白配速", "休克療法", "行動微光"]: continue
             allowed[t_key] = f"{t_desc} {t_enh}".strip()
             
-        if not allowed:
-            allowed = {"斯多葛反問": "使用向下探究技術，剝開表層藉口，直擊其控制範圍內的責任。"}
-            
+        if not allowed: allowed = {"斯多葛反問": "直擊藉口，探究責任。"}
         chosen_key = random.choice(list(allowed.keys()))
         mab_instruction = allowed[chosen_key]
 
         theme_map = {"LEADER": "💮 靈性導師", "ACHIEVER": "🗿 斯多葛教練", "VICTIM": "📿 棒喝禪師", "FRAGILE": "🩹 戰地醫護兵"}
         theme = theme_map.get(state, "📿 棒喝禪師")
 
+        # 第二階段：生成五段式架構
         user_input = f"""
         Role: {theme} | User: {name}
         DNA: {old_dna}
@@ -292,22 +281,23 @@ def generate_ai_reply(trigger, **kwargs):
         REQUIRED TACTIC: {mab_instruction}
         Report: {clean_rpt}
         
-        # STRICT JSON ONLY (Ensure semantic completeness):
+        # STRICT JSON ONLY:
         {{
             "EMPATHY": "先同理處境，建立安全感 (30-60 words)",
-            "POINT": "向下探究技術：直擊核心信念或給予深度肯定 (30-80 words)",
-            "LOGIC": "認知重構：提供邏輯，引導思維轉變 (50-120 words)",
-            "ACTION": "FBM 行為提示：根據狀態進行能力降維，給出明日具體行動 (50-120 words)",
+            "POINT": "直擊核心信念或給予深度肯定 (30-80 words)",
+            "LOGIC": "認知重構：提供邏輯引導 (50-120 words)",
+            "ACTION": "FBM 行為提示：給出明日具體行動 (50-120 words)",
             "OS": "毒舌或幽默收尾 (20-40 words)",
             "SCORE": 8
         }}
         """
 
         res = model.generate_content(user_input, require_json=True)
-        if not res: raise Exception("AI_RETURNED_NONE")
+        if not res: raise Exception("API_RETURNED_NONE")
         res_json = extract_json_payload(res.text)
         if not res_json: raise Exception("JSON_PARSE_FAILED")
 
+        # 第三階段：寫入資料庫
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE reports SET sdt_a=%s, sdt_c=%s, sdt_r=%s WHERE group_id=%s AND normalized_name=%s AND report_date=%s::date", (sa, sc, sr, group_id, name, report_date))
@@ -318,30 +308,14 @@ def generate_ai_reply(trigger, **kwargs):
 
         def safe_text(t): return re.sub(r'\*\*', '', str(t)).strip()
 
+        # 第四階段：組裝最終回覆字串 (嚴格依照戰術決定是否有五段)
         if chosen_key == "留白配速":
-            final_reply = (
-                f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n"
-                f"📊 狀態：`{sdt_scores}`\n\n"
-                f"🤝 共鳴 (The Empathy)\n{safe_text(res_json.get('EMPATHY'))}\n\n"
-                f"⏳ 教練留白\n當你準備好面對時，我們再繼續深入。\n\n"
-                f"(阿摩 OS：{safe_text(res_json.get('OS'))})"
-            )
+            final_reply = f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n📊 狀態：`{sdt_scores}`\n\n🤝 共鳴 (The Empathy)\n{safe_text(res_json.get('EMPATHY'))}\n\n⏳ 教練留白\n當你準備好面對時，我們再繼續深入。\n\n(阿摩 OS：{safe_text(res_json.get('OS'))})"
         else:
-            final_reply = (
-                f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n"
-                f"📊 狀態：`{sdt_scores}`\n\n"
-                f"🤝 共鳴 (The Empathy)\n{safe_text(res_json.get('EMPATHY'))}\n\n"
-                f"🎯 盲點 (The Point)\n{safe_text(res_json.get('POINT'))}\n\n"
-                f"🧠 邏輯 (The Logic)\n{safe_text(res_json.get('LOGIC'))}\n\n"
-                f"⚡ 突破 (The Action)\n戰術：【 {chosen_key} 】\n{safe_text(res_json.get('ACTION'))}\n\n"
-                f"(阿摩 OS：{safe_text(res_json.get('OS'))})"
-            )
+            final_reply = f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n📊 狀態：`{sdt_scores}`\n\n🤝 共鳴 (The Empathy)\n{safe_text(res_json.get('EMPATHY'))}\n\n🎯 盲點 (The Point)\n{safe_text(res_json.get('POINT'))}\n\n🧠 邏輯 (The Logic)\n{safe_text(res_json.get('LOGIC'))}\n\n⚡ 突破 (The Action)\n戰術：【 {chosen_key} 】\n{safe_text(res_json.get('ACTION'))}\n\n(阿摩 OS：{safe_text(res_json.get('OS'))})"
             
         return {"text": final_reply, "score": int(res_json.get("SCORE", 5)), "diagnosis": safe_text(res_json.get("POINT"))}
 
     except Exception as e:
         print(f"❌ 系統架構崩潰: {traceback.format_exc()}", file=sys.stderr)
-        return {
-            "text": "📿 **啟動模式：【 靜默觀照 】**\n\n阿摩正在深層連結你的數據。剛才的思考被雜訊干擾，但我已記下你的成長。明日繼續保持動作。",
-            "score": 5, "diagnosis": "系統解析暫失效"
-        }
+        return {"text": "📿 **啟動模式：【 靜默觀照 】**\n\n阿摩正在深層連結你的數據。剛才的思考被雜訊干擾，但我已記下你的成長。", "score": 5, "diagnosis": "系統解析暫失效"}
