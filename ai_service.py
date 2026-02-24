@@ -137,31 +137,32 @@ def get_recent_competence_trend(group_id, name, days=7):
     except: return []
 
 # ==========================================
-# 🔥 V41 混合式架構 (Neuro-symbolic AI) 評分引擎
-# 極限收緊 R 分數，徹底根除「口頭感恩騙高分」
+# 🔥 V42 終極物理鎖定 (Neuro-symbolic 3.0)
+# 徹底根除 AI 正向偏見，導入三維度強制降分邏輯
 # ==========================================
 def evaluate_sdt_state(insight):
     try:
         prompt = f"""
-        你是一位極度嚴格但公允的企業高管。請根據以下日報評估 SDT 理論的三個維度 (0.0到1.0)。
+        你是一位極度冷血、只看客觀事實的系統稽核員。請根據以下日報，評估三個維度(0.0~1.0)，並回答三個客觀事實(true/false)。
         
-        【階段一：AI 語意降維】
-        過濾掉純粹的「情緒抒發、空泛感恩」，掃描是否有「具體的業務或工作行動」(如收單、面試、客訴處理、開發、實體會議)。
-        只要有做具體的物理工作，`has_action` 就是 true。
-        只有當整篇日報全是心情日記，完全沒有交代任何物理動作時，`has_action` 才為 false。
+        【第一階段：事實查核 (Fact Check)】
+        1. `has_physical_action`: 是否有實質的「物理業務動作」？(如：收單、跳摳、面試、客訴處理、實體開發)。純思考、感恩、開會聽講，皆為 false。
+        2. `has_deep_reflection`: 是否有拆解出問題的「底層邏輯」並提出「改變策略」？只是說"要更努力、成績不理想"皆為 false。
+        3. `has_altruism`: 是否有「實質幫助他人」的物理動作？(如：幫同事收單、教導新人)。只有口頭寫"感謝某某某"，皆為 false。
         
-        【階段二：SDT 極限嚴格打分】
-        0.5 是凡人基準線。
-        A (自主性): 0.4~0.5=被動或抱怨；0.7+=展現破局思維與強烈主動性。
-        C (勝任感): 0.4~0.5=普通執行或沒有賣出；0.7+=展現對業務的絕對掌控、深刻覆盤。
-        R (關聯性): 0.4~0.5=只有口頭/文字上的「感謝」或「感恩」(如:感謝客人、感謝天氣)；0.75+=必須有「實質的利他行動」或「實質領導力」(如:主動幫同事成交、實際指導新人、替團隊扛下責任)。
+        【第二階段：SDT 初始打分】
+        0.5 為普通凡人基準線。
+        A (自主性): 0.5=被動執行；0.8+=展現強烈主動破局思維。
+        C (勝任感): 0.5=運氣好或無產值；0.8+=絕對掌控局勢與高價值產出。
+        R (關聯性): 0.5=表面客套；0.8+=實質團隊貢獻與領導。
         
         日報內容: "{insight}"
         
         Return JSON ONLY using this exact schema: 
         {{
-            "extracted_actions": "簡述具體動作，若無請填無",
-            "has_action": boolean,
+            "has_physical_action": boolean,
+            "has_deep_reflection": boolean,
+            "has_altruism": boolean,
             "A": float,
             "C": float,
             "R": float
@@ -173,13 +174,28 @@ def evaluate_sdt_state(insight):
         payload = extract_json_payload(res.text)
         if not payload: return "API_ERROR", "A:0|C:0|R:0", (0.0, 0.0, 0.0)
         
-        actions = payload.get("extracted_actions", "無")
-        has_action = payload.get("has_action", True) 
-        a, c, r = float(payload.get("A", 0.5)), float(payload.get("C", 0.5)), float(payload.get("R", 0.5))
+        a = float(payload.get("A", 0.5))
+        c = float(payload.get("C", 0.5))
+        r = float(payload.get("R", 0.5))
         
+        has_action = payload.get("has_physical_action", True) 
+        has_reflection = payload.get("has_deep_reflection", True) 
+        has_altruism = payload.get("has_altruism", True) 
+        
+        # 🔥 V42 Python 剛性執法：無情上鎖
+        lock_msgs = []
         if not has_action:
             a, c = min(a, 0.5), min(c, 0.5)
-            print(f"🔒 [Neuro-symbolic 執法] 缺乏實質行動，啟動硬上限鎖定！動作: {actions}", file=sys.stderr)
+            lock_msgs.append("無動作(A/C鎖0.5)")
+        if not has_reflection:
+            c = min(c, 0.6)
+            lock_msgs.append("無深度覆盤(C鎖0.6)")
+        if not has_altruism:
+            r = min(r, 0.5) 
+            lock_msgs.append("無實質利他(R鎖0.5)")
+            
+        if lock_msgs:
+            print(f"🔒 [V42 物理鎖觸發] {', '.join(lock_msgs)}", file=sys.stderr)
             
         if a < 0.4 and c < 0.4 and not has_action: state = "FRAGILE"
         elif a < 0.6 or c < 0.6: state = "VICTIM"
@@ -191,9 +207,6 @@ def evaluate_sdt_state(insight):
         print(f"⚠️ 評分系統異常: {e}", file=sys.stderr)
         return "API_ERROR", "A:0|C:0|R:0", (0.0, 0.0, 0.0)
 
-# ==========================================
-# ⚖️ 3. 雙軌制獎勵函數 (Double-Track Reward)
-# ==========================================
 def calculate_and_record_reward(group_id, name, report_date_str, current_a, current_c):
     try:
         report_date = datetime.strptime(report_date_str, '%Y-%m-%d').date()
@@ -215,7 +228,7 @@ def calculate_and_record_reward(group_id, name, report_date_str, current_a, curr
     except Exception: pass
 
 # ==========================================
-# 💬 4. 系統組裝 (閉環演化掛載點)
+# 💬 4. 系統組裝 (V43 平衡版 Smart Brevity)
 # ==========================================
 def generate_ai_reply(trigger, **kwargs):
     if trigger != "report_success": return {"text": "已記錄。", "score": 0}
@@ -233,16 +246,10 @@ def generate_ai_reply(trigger, **kwargs):
         if group_id and name:
             threading.Thread(target=distill_mindset_dna, args=(group_id, name, clean_rpt, old_dna)).start()
 
-        # 第一階段：極限嚴格打分
         state, sdt_scores, (sa, sc, sr) = evaluate_sdt_state(clean_rpt)
         
-        # 🔥 V41: Fast-Fail 斷路器
-        # 如果打分階段就已經被 Google 阻擋，直接回傳靜默，不再呼叫第二次浪費額度
         if state == "API_ERROR":
-            return {
-                "text": "📿 **啟動模式：【 靜默觀照 】**\n\n阿摩正在深層連結你的數據。剛才的思考被雜訊干擾，但我已記下你的成長。",
-                "score": 5, "diagnosis": "API 額度耗盡或連線失敗"
-            }
+            return {"text": "📿 **啟提模式：【 靜默觀照 】**\n\n阿摩正在深層連結你的數據。剛才的思考被雜訊干擾，但我已記下你的成長。", "score": 5, "diagnosis": "API 額度耗盡或連線失敗"}
 
         recent_trend = get_recent_competence_trend(group_id, name, days=7)
         trend_context = f"🔥 該員近7日勝任感(C)軌跡: {recent_trend}" if recent_trend else ""
@@ -260,7 +267,6 @@ def generate_ai_reply(trigger, **kwargs):
         for row in db_tactics:
             t_key, t_desc, t_enh, t_risk = row
             if state == "FRAGILE" and t_risk == "high": continue
-            # 🔥 V41 鐵律防呆：LEADER 絕對不能使用這三個消極戰術
             if state == "LEADER" and t_key in ["留白配速", "休克療法", "行動微光"]: continue
             allowed[t_key] = f"{t_desc} {t_enh}".strip()
             
@@ -271,7 +277,7 @@ def generate_ai_reply(trigger, **kwargs):
         theme_map = {"LEADER": "💮 靈性導師", "ACHIEVER": "🗿 斯多葛教練", "VICTIM": "📿 棒喝禪師", "FRAGILE": "🩹 戰地醫護兵"}
         theme = theme_map.get(state, "📿 棒喝禪師")
 
-        # 第二階段：生成五段式架構
+        # 🔥 V43 平衡版：50-100字 Smart Brevity 框架
         user_input = f"""
         Role: {theme} | User: {name}
         DNA: {old_dna}
@@ -281,13 +287,17 @@ def generate_ai_reply(trigger, **kwargs):
         REQUIRED TACTIC: {mab_instruction}
         Report: {clean_rpt}
         
+        【極度重要：貫徹 Smart Brevity (精簡溝通) 鐵律】
+        讀者處於高壓疲勞狀態，你必須消除修辭贅肉，拒絕長篇大論的心靈雞湯，使用白話文與直白語氣。
+        請根據以下結構產出，各區塊(含標點)嚴格控制在 50-100 字之間，不分場合皆適用此標準。
+        
         # STRICT JSON ONLY:
         {{
-            "EMPATHY": "先同理處境，建立安全感 (30-60 words)",
-            "POINT": "直擊核心信念或給予深度肯定 (30-80 words)",
-            "LOGIC": "認知重構：提供邏輯引導 (50-120 words)",
-            "ACTION": "FBM 行為提示：給出明日具體行動 (50-120 words)",
-            "OS": "毒舌或幽默收尾 (20-40 words)",
+            "EMPATHY": "引子(The Hook)：直接肯定核心成就或點出處境。拒絕過度情緒鋪陳。(限 50-100 字)",
+            "POINT": "導言(The Lede)：簡單粗暴直擊盲點，或宣告客觀真理。(限 50-100 字)",
+            "LOGIC": "脈絡(The Axiom)：為什麼這很重要？強制使用 1~2 個條列式重點(Bullet points)說明因果關係。(限 50-100 字)",
+            "ACTION": "行動(The Action)：給出明日具體、可量化、有時限的物理 KPI。嚴禁「感受能量」等模糊任務。(限 50-100 字)",
+            "OS": "毒舌、資本家嘲諷或幽默收尾，一針見血。(限 20-40 字)",
             "SCORE": 8
         }}
         """
@@ -297,7 +307,6 @@ def generate_ai_reply(trigger, **kwargs):
         res_json = extract_json_payload(res.text)
         if not res_json: raise Exception("JSON_PARSE_FAILED")
 
-        # 第三階段：寫入資料庫
         with get_db() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE reports SET sdt_a=%s, sdt_c=%s, sdt_r=%s WHERE group_id=%s AND normalized_name=%s AND report_date=%s::date", (sa, sc, sr, group_id, name, report_date))
@@ -308,7 +317,6 @@ def generate_ai_reply(trigger, **kwargs):
 
         def safe_text(t): return re.sub(r'\*\*', '', str(t)).strip()
 
-        # 第四階段：組裝最終回覆字串 (嚴格依照戰術決定是否有五段)
         if chosen_key == "留白配速":
             final_reply = f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n📊 狀態：`{sdt_scores}`\n\n🤝 共鳴 (The Empathy)\n{safe_text(res_json.get('EMPATHY'))}\n\n⏳ 教練留白\n當你準備好面對時，我們再繼續深入。\n\n(阿摩 OS：{safe_text(res_json.get('OS'))})"
         else:
