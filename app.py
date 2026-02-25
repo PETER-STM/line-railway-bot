@@ -84,6 +84,7 @@ handler = WebhookHandler(Config.LINE_CHANNEL_SECRET)
 # 解析日報標題的 Regex
 REPORT_HEADER_REGEX = re.compile(r'^(\d{4}[./-]\d{1,2}[./-]\d{1,2})\s*([^\n]+)', re.UNICODE)
 
+# 👇 這是唯一新增的段落，用來應付 Railway 的健康檢查 👇
 @app.route("/", methods=['GET'])
 def health_check():
     return "OK V32.10 Matrix Agent Running", 200
