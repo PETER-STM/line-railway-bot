@@ -84,10 +84,10 @@ handler = WebhookHandler(Config.LINE_CHANNEL_SECRET)
 # 解析日報標題的 Regex
 REPORT_HEADER_REGEX = re.compile(r'^(\d{4}[./-]\d{1,2}[./-]\d{1,2})\s*([^\n]+)', re.UNICODE)
 
-# 👇 這是唯一新增的段落，用來應付 Railway 的健康檢查 👇
+# 👇 用來應付 Railway 的健康檢查 👇
 @app.route("/", methods=['GET'])
 def health_check():
-    return "OK V32.10 Matrix Agent Running", 200
+    return "OK V43 Matrix Agent Running", 200
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -113,7 +113,7 @@ def handle_message(event):
             with conn.cursor() as cur:
                 cur.execute("INSERT INTO group_configs (group_id, ai_mode, mode_type) VALUES (%s, TRUE, 'full') ON CONFLICT (group_id) DO UPDATE SET ai_mode = TRUE, mode_type = 'full'", (group_id,))
             conn.commit()
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚙️ 模式：full (V32.10 矩陣搜救啟動)"))
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚙️ 模式：full (V43 矩陣搜救啟動)"))
         return
     elif msg == "阿摩切換精簡":
         with get_db() as conn:
@@ -145,7 +145,7 @@ def handle_message(event):
                 
             missing_report, completed_list, _ = utils.calculate_missing_stats(group_id, s_date, e_date)
             
-            # 核心：連續日期壓縮演算法 (將 2/2, 2/3, 2/4 壓縮成 2/2-2/4)
+            # 核心：連續日期壓縮演算法
             def compress_dates(date_strs):
                 if not date_strs: return ""
                 dates = sorted([datetime.strptime(d, '%Y-%m-%d').date() for d in date_strs])
@@ -180,7 +180,7 @@ def handle_message(event):
                 reply_text += "━━━━━━━━━━━━━━\n"
                 
             total_points = 0
-            # 處理缺交罰款名單
+            # 處理缺交罰款名單 (極簡格式)
             if missing_report:
                 for name, dates in missing_report.items():
                     missing_count = len(dates)

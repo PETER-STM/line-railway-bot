@@ -277,7 +277,7 @@ def generate_ai_reply(trigger, **kwargs):
         theme_map = {"LEADER": "💮 靈性導師", "ACHIEVER": "🗿 斯多葛教練", "VICTIM": "📿 棒喝禪師", "FRAGILE": "🩹 戰地醫護兵"}
         theme = theme_map.get(state, "📿 棒喝禪師")
 
-        # 🔥 V43 平衡版：50-100字 Smart Brevity 框架
+        # 🔥 V43 平衡版：Smart Brevity 框架，極限控制字數
         user_input = f"""
         Role: {theme} | User: {name}
         DNA: {old_dna}
@@ -289,14 +289,14 @@ def generate_ai_reply(trigger, **kwargs):
         
         【極度重要：貫徹 Smart Brevity (精簡溝通) 鐵律】
         讀者處於高壓疲勞狀態，你必須消除修辭贅肉，拒絕長篇大論的心靈雞湯，使用白話文與直白語氣。
-        請根據以下結構產出，各區塊(含標點)嚴格控制在 50-100 字之間，不分場合皆適用此標準。
+        請根據以下結構產出，各區塊(含標點)嚴格控制字數，不分場合皆適用此標準。
         
         # STRICT JSON ONLY:
         {{
-            "EMPATHY": "引子(The Hook)：直接肯定核心成就或點出處境。拒絕過度情緒鋪陳。(限 50-100 字)",
-            "POINT": "導言(The Lede)：簡單粗暴直擊盲點，或宣告客觀真理。(限 50-100 字)",
-            "LOGIC": "脈絡(The Axiom)：為什麼這很重要？強制使用 1~2 個條列式重點(Bullet points)說明因果關係。(限 50-100 字)",
-            "ACTION": "行動(The Action)：給出明日具體、可量化、有時限的物理 KPI。嚴禁「感受能量」等模糊任務。(限 50-100 字)",
+            "HOOK": "引子：一句話直接肯定核心成就或點出處境。拒絕過度情緒鋪陳。(限 20 字內)",
+            "LEDE": "導言：一句話簡單粗暴直擊盲點，或宣告客觀真理。(限 30 字內)",
+            "CONTEXT": "脈絡：為什麼這很重要？強制使用 1~2 個條列式重點說明因果關係。(限 50 字內)",
+            "ACTION": "行動：給出明日具體、可量化、有時限的物理 KPI。嚴禁「感受能量」等模糊任務。(限 30 字內)",
             "OS": "毒舌、資本家嘲諷或幽默收尾，一針見血。(限 20-40 字)",
             "SCORE": 8
         }}
@@ -317,12 +317,13 @@ def generate_ai_reply(trigger, **kwargs):
 
         def safe_text(t): return re.sub(r'\*\*', '', str(t)).strip()
 
+        # 🔥 真正的 V43 極簡四標題輸出格式 (完全拋棄共鳴/盲點等舊詞彙)
         if chosen_key == "留白配速":
-            final_reply = f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n📊 狀態：`{sdt_scores}`\n\n🤝 共鳴 (The Empathy)\n{safe_text(res_json.get('EMPATHY'))}\n\n⏳ 教練留白\n當你準備好面對時，我們再繼續深入。\n\n(阿摩 OS：{safe_text(res_json.get('OS'))})"
+            final_reply = f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n📊 狀態：`{sdt_scores}`\n\n📌 引子\n{safe_text(res_json.get('HOOK'))}\n\n⏳ 教練留白\n當你準備好面對時，我們再繼續深入。\n\n(阿摩 OS：{safe_text(res_json.get('OS'))})"
         else:
-            final_reply = f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n📊 狀態：`{sdt_scores}`\n\n🤝 共鳴 (The Empathy)\n{safe_text(res_json.get('EMPATHY'))}\n\n🎯 盲點 (The Point)\n{safe_text(res_json.get('POINT'))}\n\n🧠 邏輯 (The Logic)\n{safe_text(res_json.get('LOGIC'))}\n\n⚡ 突破 (The Action)\n戰術：【 {chosen_key} 】\n{safe_text(res_json.get('ACTION'))}\n\n(阿摩 OS：{safe_text(res_json.get('OS'))})"
+            final_reply = f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n📊 狀態：`{sdt_scores}`\n\n📌 引子\n{safe_text(res_json.get('HOOK'))}\n\n🎯 導言\n{safe_text(res_json.get('LEDE'))}\n\n🧠 脈絡\n{safe_text(res_json.get('CONTEXT'))}\n\n⚡ 行動 (戰術：{chosen_key})\n{safe_text(res_json.get('ACTION'))}\n\n(阿摩 OS：{safe_text(res_json.get('OS'))})"
             
-        return {"text": final_reply, "score": int(res_json.get("SCORE", 5)), "diagnosis": safe_text(res_json.get("POINT"))}
+        return {"text": final_reply, "score": int(res_json.get("SCORE", 5)), "diagnosis": safe_text(res_json.get("LEDE"))}
 
     except Exception as e:
         print(f"❌ 系統架構崩潰: {traceback.format_exc()}", file=sys.stderr)
