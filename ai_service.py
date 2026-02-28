@@ -6,6 +6,8 @@ import random
 import threading
 import traceback
 import requests 
+import importlib.util
+import os
 from datetime import datetime, timedelta
 from config import Config
 from database import get_db
@@ -106,6 +108,23 @@ class SafeGeminiModel:
 model = SafeGeminiModel() if Config.GOOGLE_API_KEY else None
 
 # ==========================================
+# 🧬 動態神經元加載器 (NEW!)
+# ==========================================
+def call_dynamic_skill(skill_name, method_name, *args):
+    """嘗試調用 skills/ 資料夾下的自定義神經元"""
+    try:
+        file_path = os.path.join("skills", f"{skill_name}.py")
+        if os.path.exists(file_path):
+            spec = importlib.util.spec_from_file_location(skill_name, file_path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            method = getattr(module, method_name)
+            return method(*args)
+    except Exception as e:
+        print(f"⚠️ 神經元調用失敗 ({skill_name}): {e}", file=sys.stderr)
+    return None
+
+# ==========================================
 # 🧩 1. 情境工程：語境設定
 # ==========================================
 CONTEXT_LIBRARY = {
@@ -138,7 +157,6 @@ def get_recent_competence_trend(group_id, name, days=7):
 
 # ==========================================
 # 🔥 V42 終極物理鎖定 (Neuro-symbolic 3.0)
-# 徹底根除 AI 正向偏見，導入三維度強制降分邏輯
 # ==========================================
 def evaluate_sdt_state(insight):
     try:
@@ -182,7 +200,6 @@ def evaluate_sdt_state(insight):
         has_reflection = payload.get("has_deep_reflection", True) 
         has_altruism = payload.get("has_altruism", True) 
         
-        # 🔥 V42 Python 剛性執法：無情上鎖
         lock_msgs = []
         if not has_action:
             a, c = min(a, 0.5), min(c, 0.5)
@@ -228,7 +245,7 @@ def calculate_and_record_reward(group_id, name, report_date_str, current_a, curr
     except Exception: pass
 
 # ==========================================
-# 💬 4. 系統組裝 (V43 平衡版 Smart Brevity)
+# 💬 4. 系統組裝 (V43 平衡版 Smart Brevity + 神經元)
 # ==========================================
 def generate_ai_reply(trigger, **kwargs):
     if trigger != "report_success": return {"text": "已記錄。", "score": 0}
@@ -245,6 +262,15 @@ def generate_ai_reply(trigger, **kwargs):
 
         if group_id and name:
             threading.Thread(target=distill_mindset_dna, args=(group_id, name, clean_rpt, old_dna)).start()
+
+        # 🔥 1. 呼叫動態神經元 (藉口探測器)
+        excuse_data = call_dynamic_skill("excuse_detector_v2", "analyze", clean_rpt)
+        excuse_score = excuse_data.get("excuse_level", 0) if excuse_data else 0
+        keywords = excuse_data.get("detected_keywords", []) if excuse_data else []
+        
+        excuse_warning = ""
+        if excuse_score >= 30: # 只要抓到一個重度或兩個輕度就警告
+             excuse_warning = f"【系統警告：偵測到高度推卸責任！藉口分數：{excuse_score}。使用者試圖將失敗歸咎於：{', '.join(keywords)}。請務必在回覆中嚴厲戳破這些藉口。】"
 
         state, sdt_scores, (sa, sc, sr) = evaluate_sdt_state(clean_rpt)
         
@@ -277,11 +303,12 @@ def generate_ai_reply(trigger, **kwargs):
         theme_map = {"LEADER": "💮 靈性導師", "ACHIEVER": "🗿 斯多葛教練", "VICTIM": "📿 棒喝禪師", "FRAGILE": "🩹 戰地醫護兵"}
         theme = theme_map.get(state, "📿 棒喝禪師")
 
-        # 🔥 V43 平衡版：Smart Brevity 框架，極限控制字數
+        # 🔥 V43 平衡版：Smart Brevity 框架 + 藉口警報
         user_input = f"""
         Role: {theme} | User: {name}
         DNA: {old_dna}
         Trend: {trend_context}
+        {excuse_warning}
         {CONTEXT_LIBRARY['CORE']}
         {CONTEXT_LIBRARY.get(state, "")}
         REQUIRED TACTIC: {mab_instruction}
@@ -317,11 +344,24 @@ def generate_ai_reply(trigger, **kwargs):
 
         def safe_text(t): return re.sub(r'\*\*', '', str(t)).strip()
 
-        # 🔥 真正的 V43 極簡四標題輸出格式 (完全拋棄共鳴/盲點等舊詞彙)
+        # 🔥 真正的 V43 極簡四標題輸出格式 (根據藉口分數決定是否加上警報標籤)
+        final_reply = f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n"
+        final_reply += f"📊 狀態：`{sdt_scores}`\n\n"
+        
+        if excuse_score >= 30:
+            final_reply += f"⚠️ **[藉口警報：{excuse_score}分]**\n"
+            final_reply += f"偵測到推卸責任：{', '.join(keywords[:3])}\n\n"
+            
+        final_reply += f"📌 引子\n{safe_text(res_json.get('HOOK'))}\n\n"
+        
         if chosen_key == "留白配速":
-            final_reply = f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n📊 狀態：`{sdt_scores}`\n\n📌 引子\n{safe_text(res_json.get('HOOK'))}\n\n⏳ 教練留白\n當你準備好面對時，我們再繼續深入。\n\n(阿摩 OS：{safe_text(res_json.get('OS'))})"
+            final_reply += f"⏳ 教練留白\n當你準備好面對時，我們再繼續深入。\n\n"
         else:
-            final_reply = f"{theme.split(' ')[0]} 啟動模式：【 {theme.split(' ')[1]} 】\n📊 狀態：`{sdt_scores}`\n\n📌 引子\n{safe_text(res_json.get('HOOK'))}\n\n🎯 導言\n{safe_text(res_json.get('LEDE'))}\n\n🧠 脈絡\n{safe_text(res_json.get('CONTEXT'))}\n\n⚡ 行動 (戰術：{chosen_key})\n{safe_text(res_json.get('ACTION'))}\n\n(阿摩 OS：{safe_text(res_json.get('OS'))})"
+            final_reply += f"🎯 導言\n{safe_text(res_json.get('LEDE'))}\n\n"
+            final_reply += f"🧠 脈絡\n{safe_text(res_json.get('CONTEXT'))}\n\n"
+            final_reply += f"⚡ 行動 (戰術：{chosen_key})\n{safe_text(res_json.get('ACTION'))}\n\n"
+            
+        final_reply += f"(阿摩 OS：{safe_text(res_json.get('OS'))})"
             
         return {"text": final_reply, "score": int(res_json.get("SCORE", 5)), "diagnosis": safe_text(res_json.get("LEDE"))}
 
