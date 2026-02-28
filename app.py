@@ -29,6 +29,9 @@ def check_and_update_schema():
     print("🧬 檢查資料庫演化狀態...", file=sys.stderr)
     try:
         with get_db() as conn:
+            # 確保是在非交易狀態下進行 Schema 變更
+            conn.rollback()
+            conn.autocommit = True
             with conn.cursor() as cur:
                 # 檢查 group_vips 表格
                 cols_to_add = [
@@ -39,10 +42,11 @@ def check_and_update_schema():
                     ('tier_confidence', 'FLOAT DEFAULT 0.0')
                 ]
                 for col, dtype in cols_to_add:
-                    cur.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name='group_vips' AND column_name='{col}'")
-                    if not cur.fetchone():
-                        cur.execute(f"ALTER TABLE group_vips ADD COLUMN {col} {dtype}")
-                        print(f"✅ [Schema Update] Added {col} to group_vips", file=sys.stderr)
+                    try:
+                        # 使用 IF NOT EXISTS 作為雙重保險，並包裹在 try 中防止單點崩潰
+                        cur.execute(f"ALTER TABLE group_vips ADD COLUMN IF NOT EXISTS {col} {dtype}")
+                    except Exception as e:
+                        print(f"⚠️ [Schema Info] group_vips {col} 略過: {e}", file=sys.stderr)
 
                 # 檢查 reports 表格
                 report_cols = [
@@ -54,10 +58,10 @@ def check_and_update_schema():
                     ('distortion', 'TEXT DEFAULT \'\'')
                 ]
                 for col, dtype in report_cols:
-                    cur.execute(f"SELECT column_name FROM information_schema.columns WHERE table_name='reports' AND column_name='{col}'")
-                    if not cur.fetchone():
-                        cur.execute(f"ALTER TABLE reports ADD COLUMN {col} {dtype}")
-                        print(f"✅ [Schema Update] Added {col} to reports", file=sys.stderr)
+                    try:
+                        cur.execute(f"ALTER TABLE reports ADD COLUMN IF NOT EXISTS {col} {dtype}")
+                    except Exception as e:
+                        print(f"⚠️ [Schema Info] reports {col} 略過: {e}", file=sys.stderr)
                         
                 # 建立貝氏推論戰術統計表
                 cur.execute("""
@@ -71,7 +75,7 @@ def check_and_update_schema():
                         UNIQUE(normalized_name, tactic_key)
                     )
                 """)
-            conn.commit()
+            print("✅ 演化檢查完成，系統準備就緒。", file=sys.stderr)
     except Exception as e:
         print(f"⚠️ Schema Update Check Failed: {e}", file=sys.stderr)
 
@@ -258,4 +262,7 @@ scheduler.add_job(task_scheduler.run_system_evolution, CronTrigger(day_of_week='
 scheduler.start()
 
 if __name__ == "__main__":
+    # 🔥 將初始化移到這裡，確保 Flask 先啟動
+    init_db()
+    check_and_update_schema()
     app.run(host="0.0.0.0", port=Config.PORT)
