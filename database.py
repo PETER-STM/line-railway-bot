@@ -114,7 +114,8 @@ def init_db():
                 ]
                 for col, dtype in new_report_cols:
                     try:
-                        cur.execute(f"ALTER TABLE reports ADD COLUMN {col} {dtype}")
+                        # 🔥 加入 IF NOT EXISTS 防呆盾牌
+                        cur.execute(f"ALTER TABLE reports ADD COLUMN IF NOT EXISTS {col} {dtype}")
                     except psycopg2.errors.DuplicateColumn:
                         pass 
                     except Exception:
@@ -127,7 +128,8 @@ def init_db():
                             ("tr_tag", "TEXT"), ("tr_strategy", "TEXT"), ("tr_incantation", "TEXT")]
                 for col, dtype in vip_cols:
                     try:
-                        cur.execute(f"ALTER TABLE group_vips ADD COLUMN {col} {dtype}")
+                        # 🔥 加入 IF NOT EXISTS 防呆盾牌
+                        cur.execute(f"ALTER TABLE group_vips ADD COLUMN IF NOT EXISTS {col} {dtype}")
                     except psycopg2.errors.DuplicateColumn:
                         pass
                     except Exception:
