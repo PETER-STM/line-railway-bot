@@ -30,6 +30,13 @@ def check_and_update_schema():
             conn.rollback()
             conn.autocommit = True
             with conn.cursor() as cur:
+                # 1. 更新群組設定欄位 (加入靈魂覺醒開關)
+                try:
+                    cur.execute("ALTER TABLE group_configs ADD COLUMN IF NOT EXISTS enable_reflection BOOLEAN DEFAULT FALSE")
+                except Exception:
+                    pass
+
+                # 2. 更新 VIP 欄位
                 cols_to_add = [
                     ('meta_patterns', 'TEXT DEFAULT \'\''),
                     ('diagnosis', 'TEXT DEFAULT \'\''),
@@ -40,9 +47,10 @@ def check_and_update_schema():
                 for col, dtype in cols_to_add:
                     try:
                         cur.execute(f"ALTER TABLE group_vips ADD COLUMN IF NOT EXISTS {col} {dtype}")
-                    except Exception as e:
+                    except Exception:
                         pass
 
+                # 3. 更新日報欄位
                 report_cols = [
                     ('diagnosis', 'TEXT DEFAULT \'\''),
                     ('score', 'INT DEFAULT 0'),
@@ -54,9 +62,10 @@ def check_and_update_schema():
                 for col, dtype in report_cols:
                     try:
                         cur.execute(f"ALTER TABLE reports ADD COLUMN IF NOT EXISTS {col} {dtype}")
-                    except Exception as e:
+                    except Exception:
                         pass
                         
+                # 4. 建立 mab_stats 表格
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS mab_stats (
                         id SERIAL PRIMARY KEY,
@@ -68,6 +77,8 @@ def check_and_update_schema():
                         UNIQUE(normalized_name, tactic_key)
                     )
                 """)
+            # 🔥 確保所有 cur.execute 都執行完後，才在 with cur 區塊外進行 commit
+            conn.commit()
             print("✅ 演化檢查完成，系統準備就緒。", file=sys.stderr)
     except Exception as e:
         print(f"⚠️ Schema Update Check Failed: {e}", file=sys.stderr)
@@ -112,6 +123,7 @@ def handle_message(event):
             conn.commit()
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚙️ 模式：full (V43 矩陣搜救啟動)"))
         return
+        
     elif msg == "阿摩切換精簡":
         with get_db() as conn:
             with conn.cursor() as cur:
@@ -123,6 +135,27 @@ def handle_message(event):
             conn.commit()
         line_bot_api.reply_message(event.reply_token, TextSendMessage(text="⚙️ 模式：simple (僅紀錄)"))
         return
+        
+    elif msg == "阿摩開啟靈魂覺醒":
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO group_configs (group_id, enable_reflection) 
+                    VALUES (%s, TRUE) 
+                    ON CONFLICT (group_id) DO UPDATE SET enable_reflection = TRUE
+                """, (group_id,))
+            conn.commit()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🌌 [靈魂覺醒已開啟]\n阿摩將於每週日凌晨 2 點，為本群組撰寫並發表專屬的「教練反思日記」。"))
+        return
+
+    elif msg == "阿摩關閉靈魂覺醒":
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE group_configs SET enable_reflection = FALSE WHERE group_id = %s", (group_id,))
+            conn.commit()
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="🛑 [靈魂覺醒已關閉]\n阿摩已停止在本群組的每週反思。"))
+        return
+    
 
     with get_db() as conn:
         with conn.cursor() as cur:
